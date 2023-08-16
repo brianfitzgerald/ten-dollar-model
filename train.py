@@ -17,6 +17,31 @@ from dataset import MovieLens20MDataset
 torch.manual_seed(0)
 
 
+class ResidualBlock(nn.Module):
+    def __init__(
+        self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1
+    ) -> None:
+        super(ResidualBlock, self).__init__()
+        self.upsample_conv1 = nn.Conv2d(
+            in_channels, out_channels, kernel_size, stride=stride, padding=1
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.upsample_conv1 = nn.Conv2d(
+            out_channels, out_channels, kernel_size, stride=stride, padding=1
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.conv2(out)
+        out += residual
+        out = self.relu(out)
+        return out
+
+
 class Generator(nn.Module):
     def __init__(
         self, noise_emb_size: int = 5, out_size: int = 16, upsample_size: int = 256
