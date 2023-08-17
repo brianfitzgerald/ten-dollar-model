@@ -10,7 +10,11 @@ from lightning.pytorch.loggers import CSVLogger
 import torchvision.transforms as transforms
 import fire
 from sentence_transformers import SentenceTransformer, util
-
+from torchvision.datasets import ImageFolder
+from torch.utils.data import Dataset
+import os
+from PIL import Image
+from torchvision.transforms import ToTensor
 
 torch.manual_seed(0)
 
@@ -40,9 +44,44 @@ class ResidualBlock(nn.Module):
         return out
 
 
+class PixelDataset(Dataset):
+    def __init__(self, data_root, transform=None):
+        self.data_root = data_root
+        self.transform = transform
+        self.image_list = [filename for filename in os.listdir(data_root) if filename.endswith('.png')]
+
+    def __len__(self):
+        return len(self.image_list)
+
+    def __getitem__(self, idx):
+        image_filename = self.image_list[idx]
+        image_path = os.path.join(self.data_root, image_filename)
+        
+        # Load image and convert to tensor
+        image = Image.open(image_path)
+        image_tensor = ToTensor()(image).unsqueeze(0)  # Add a batch dimension
+        
+        # Perform pixel-wise one-hot encoding
+        num_classes = 256  # Adjust based on your image type
+        one_hot_encoded = F.one_hot(image_tensor.to(torch.int64), num_classes=num_classes)
+        
+        # Extract text caption from image filename
+        image_name = os.path.splitext(image_filename)[0]
+        
+        # Apply any transformations if needed
+        if self.transform:
+            one_hot_encoded = self.transform(one_hot_encoded)
+        
+        return one_hot_encoded, image_name
+
+
 class Generator(nn.Module):
     def __init__(
-        self, noise_emb_size: int = 5, out_size: int = 16, upsample_size: int = 256
+        self,
+        noise_emb_size: int = 5,
+        out_size: int = 16,
+        upsample_size: int = 256,
+        num_residual_blocks: int = 6,
     ):
         super().__init__()
 
@@ -50,12 +89,23 @@ class Generator(nn.Module):
         self.reshape_layer = nn.Linear(noise_emb_size + 384, 2 * 2 * 256)
         self.upsample_conv1 = nn.Conv2d(2, 2, upsample_size, upsample_size)
         self.upsample_conv2 = nn.Conv2d(4, 4, upsample_size, upsample_size)
+        self.residual_blocks = nn.Sequential(
+            *[ResidualBlock(3, 3, 7) for x in range(num_residual_blocks)]
+        )
+        self.out_conv = nn.Conv2d(out_size, out_size, 16)
 
     def forward(self, image, caption_enc):
+        breakpoint()
         bsz = image.shape[0]
         noise = torch.randn((bsz, self.noise_emb_size))
         input_emb = torch.cat([noise, caption_enc])
         x = self.reshape_layer(input_emb)
+        x = self.upsample_conv1(x)
+        x = self.upsample_conv2(x)
+        x = self.residual_blocks(x)
+        x = self.out_conv(x)
+        return x
+
 
 
 class GeneratorModule(pl.LightningModule):
@@ -66,11 +116,15 @@ class GeneratorModule(pl.LightningModule):
         self.save_hyperparameters()
         self.sentence_encoder = SentenceTransformer(
             "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
-        )
+        ).eval()
+        for param in self.sentence_encoder.parameters():
+            param.requires_grad = False
 
     def training_step(self, batch):
         image, caption = batch
         caption_enc = self.sentence_encoder.encode(caption)
+        preds = self.generator(image, caption_enc)
+        loss = self.loss_fn()
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
@@ -87,16 +141,14 @@ class GeneratorModule(pl.LightningModule):
 
 
 def main(use_wandb: bool = False):
-    dataset = MovieLens20MDataset("ml-25m/ratings.csv")
+    dataset = PixelDataset("./spritesheets/food")
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
-    no_users, no_movies = dataset.no_movies, dataset.no_users
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
-    train_dataloader = DataLoader(train_dataset, batch_size=256, num_workers=30)
-    val_dataloader = DataLoader(test_dataset, batch_size=256, num_workers=30)
-    model = GeneratorModule(Generator(no_movies, no_users))
+    train_dataloader = DataLoader(train_dataset, batch_size=16, num_workers=1)
+    model = GeneratorModule(Generator())
     logger = None
     if use_wandb:
         logger = WandbLogger(project="recsys")
