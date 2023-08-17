@@ -11,8 +11,6 @@ import torchvision.transforms as transforms
 import fire
 from sentence_transformers import SentenceTransformer, util
 
-from dataset import MovieLens20MDataset
-
 
 torch.manual_seed(0)
 
