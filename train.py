@@ -108,7 +108,6 @@ class Generator(nn.Module):
         # x = x.view(batch_size, 4, 4, self.num_colors)
         x = self.residual_blocks(x)
         x = self.out_conv(x)
-        breakpoint()
         return x
 
 
@@ -128,13 +127,16 @@ class GeneratorModule:
 
     def training_step(self, batch):
         image, caption = batch
+        batch_size = image.shape[0]
         image = image.to(self.device)
         caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
             self.device
         )
         preds = self.generator(image, caption_enc)
+        preds_reshaped = torch.reshape(preds, (batch_size, -1, 256)).to(torch.bfloat16)
+        img_reshaped = torch.reshape(image, (batch_size, 1024, 256)).to(torch.bfloat16)
         breakpoint()
-        loss = self.loss_fn(preds, image)
+        loss = self.loss_fn(img_reshaped, preds_reshaped)
         return loss
 
     def test_step(self, batch):
