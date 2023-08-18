@@ -17,25 +17,25 @@ torch.manual_seed(0)
 
 class ResidualBlock(nn.Module):
     def __init__(
-        self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1
+        self, in_channels: int, out_channels: int, kernel_size: int=3, stride: int = 1
     ) -> None:
         super(ResidualBlock, self).__init__()
-        self.upsample_conv1 = nn.Conv2d(
+        self.conv1 = nn.Conv2d(
             in_channels, out_channels, kernel_size, stride=stride, padding=1
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
-        self.upsample_conv2 = nn.Conv2d(
+        self.conv2 = nn.Conv2d(
             out_channels, out_channels, kernel_size, stride=stride, padding=1
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
-        breakpoint()
         residual = x
-        out = self.upsample_conv1(x)
+        out = self.conv1(x)
         out = self.bn1(out)
-        out = self.upsample_conv2(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
         out += residual
         out = self.relu(out)
         return out
@@ -87,18 +87,14 @@ class Generator(nn.Module):
         self.text_emb_size: int = 384
         self.num_colors = num_colors
         self.device = device
+        self.out_size = out_size
 
-        self.upsample1 = nn.Upsample(
-            scale_factor=2, mode="bilinear", align_corners=True
-        )
-        self.upsample2 = nn.Upsample(
-            scale_factor=2, mode="bilinear", align_corners=True
-        )
+        self.upsample1 = nn.Upsample(scale_factor=2, mode='bilinear')
         self.reshape_layer = nn.Linear(
             noise_emb_size + self.text_emb_size, 2 * 2 * num_colors
         )
         self.residual_blocks = nn.Sequential(
-            *[ResidualBlock(4, 4, 4) for _ in range(num_residual_blocks)]
+            *[ResidualBlock(self.num_colors, self.num_colors) for _ in range(num_residual_blocks)]
         )
         self.out_conv = nn.Conv2d(out_size, out_size, num_colors)
 
@@ -107,10 +103,11 @@ class Generator(nn.Module):
         noise = torch.randn((batch_size, self.noise_emb_size)).to(self.device)
         input_emb = torch.cat([noise, caption_enc], 1).to(self.device)
         x = torch.relu(self.reshape_layer(input_emb))
-        x = x.view(batch_size, 2, 2, self.num_colors)
+        x = x.view(batch_size, self.num_colors, 2, 2)
         x = self.upsample1(x)
-        x = self.upsample2(x)
+        # x = x.view(batch_size, 4, 4, self.num_colors)
         x = self.residual_blocks(x)
+        x = x.view(batch_size, self.out_size, self.out_size, self.num_colors)
         x = self.out_conv(x)
         return x
 
@@ -135,7 +132,6 @@ class GeneratorModule:
         caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
             self.device
         )
-        breakpoint()
         preds = self.generator(image, caption_enc)
         loss = self.loss_fn(preds, image)
         return loss
@@ -158,7 +154,7 @@ def main(use_wandb: bool = False):
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
-    train_dataloader = DataLoader(train_dataset, batch_size=2, num_workers=16)
+    train_dataloader = DataLoader(train_dataset, batch_size=16, num_workers=16)
     device = torch.device("cuda")
     model = GeneratorModule(device, Generator(device))
     for i, batch in enumerate(train_dataloader):
