@@ -29,26 +29,29 @@ class ResidualBlock(nn.Module):
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
-        self.upsample_conv1 = nn.Conv2d(
+        self.upsample_conv2 = nn.Conv2d(
             out_channels, out_channels, kernel_size, stride=stride, padding=1
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
         residual = x
-        out = self.conv1(x)
+        out = self.upsample_conv1(x)
         out = self.bn1(out)
-        out = self.conv2(out)
+        out = self.upsample_conv2(out)
         out += residual
         out = self.relu(out)
         return out
 
 
 class PixelDataset(Dataset):
-    def __init__(self, data_root, transform=None):
+    def __init__(self, data_root, num_colors: int = 256, transform=None):
         self.data_root = data_root
         self.transform = transform
-        self.image_list = [filename for filename in os.listdir(data_root) if filename.endswith('.png')]
+        self.image_list = [
+            filename for filename in os.listdir(data_root) if filename.endswith(".png")
+        ]
+        self.num_colors: int = num_colors
 
     def __len__(self):
         return len(self.image_list)
@@ -56,22 +59,19 @@ class PixelDataset(Dataset):
     def __getitem__(self, idx):
         image_filename = self.image_list[idx]
         image_path = os.path.join(self.data_root, image_filename)
-        
-        # Load image and convert to tensor
+
         image = Image.open(image_path)
-        image_tensor = ToTensor()(image).unsqueeze(0)  # Add a batch dimension
-        
-        # Perform pixel-wise one-hot encoding
-        num_classes = 256  # Adjust based on your image type
-        one_hot_encoded = F.one_hot(image_tensor.to(torch.int64), num_classes=num_classes)
-        
-        # Extract text caption from image filename
+        image_tensor = ToTensor()(image).unsqueeze(0)
+
+        one_hot_encoded = F.one_hot(
+            image_tensor.to(torch.int64), num_classes=self.num_colors
+        )
+
         image_name = os.path.splitext(image_filename)[0]
-        
-        # Apply any transformations if needed
+
         if self.transform:
             one_hot_encoded = self.transform(one_hot_encoded)
-        
+
         return one_hot_encoded, image_name
 
 
@@ -80,35 +80,41 @@ class Generator(nn.Module):
         self,
         noise_emb_size: int = 5,
         out_size: int = 16,
-        upsample_size: int = 256,
+        num_colors: int = 256,
         num_residual_blocks: int = 6,
     ):
         super().__init__()
 
         self.noise_emb_size = noise_emb_size
-        self.upsample_size = upsample_size
-        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.text_emb_size: int = 384
+        self.num_colors = num_colors
 
-        self.reshape_layer = nn.Linear(noise_emb_size + 384, upsample_size)
-        self.upsample_conv1 = nn.Conv2d(2, 2, upsample_size, upsample_size)
+        self.upsample1 = nn.Upsample(
+            scale_factor=2, mode="bilinear", align_corners=True
+        )
+        self.upsample2 = nn.Upsample(
+            scale_factor=2, mode="bilinear", align_corners=True
+        )
+        self.reshape_layer = nn.Linear(
+            noise_emb_size + self.text_emb_size, 2 * 2 * num_colors
+        )
         self.residual_blocks = nn.Sequential(
             *[ResidualBlock(3, 3, 7) for x in range(num_residual_blocks)]
         )
         self.out_conv = nn.Conv2d(out_size, out_size, out_size)
 
     def forward(self, image, caption_enc):
-        bsz = image.shape[0]
-        noise = torch.randn((bsz, self.noise_emb_size))
-        input_emb = torch.cat([noise, caption_enc], 1).to('cuda')
+        batch_size = image.shape[0]
+        noise = torch.randn((batch_size, self.noise_emb_size))
+        input_emb = torch.cat([noise, caption_enc], 1).to("cuda")
         x = torch.relu(self.reshape_layer(input_emb))
-        x = x.view(x.size(0), 1, int(x.size(1)**0.5), int(x.size(1)**0.5))
         breakpoint()
-        x = x.reshape((bsz, self.upsample_size, self.upsample_size, 2))
-        x = self.upsample_conv1(x)
+        x = x.view(batch_size, 2, 2, self.num_colors)
+        x = self.upsample1(x)
+        x = self.upsample2(x)
         x = self.residual_blocks(x)
         x = self.out_conv(x)
         return x
-
 
 
 class GeneratorModule(pl.LightningModule):
