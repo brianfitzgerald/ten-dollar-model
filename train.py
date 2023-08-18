@@ -86,22 +86,25 @@ class Generator(nn.Module):
         super().__init__()
 
         self.noise_emb_size = noise_emb_size
-        self.reshape_layer = nn.Linear(noise_emb_size + 384, 2 * 2 * 256)
+        self.upsample_size = upsample_size
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+
+        self.reshape_layer = nn.Linear(noise_emb_size + 384, upsample_size)
         self.upsample_conv1 = nn.Conv2d(2, 2, upsample_size, upsample_size)
-        self.upsample_conv2 = nn.Conv2d(4, 4, upsample_size, upsample_size)
         self.residual_blocks = nn.Sequential(
             *[ResidualBlock(3, 3, 7) for x in range(num_residual_blocks)]
         )
-        self.out_conv = nn.Conv2d(out_size, out_size, 16)
+        self.out_conv = nn.Conv2d(out_size, out_size, out_size)
 
     def forward(self, image, caption_enc):
-        breakpoint()
         bsz = image.shape[0]
         noise = torch.randn((bsz, self.noise_emb_size))
-        input_emb = torch.cat([noise, caption_enc])
-        x = self.reshape_layer(input_emb)
+        input_emb = torch.cat([noise, caption_enc], 1).to('cuda')
+        x = torch.relu(self.reshape_layer(input_emb))
+        x = x.view(x.size(0), 1, int(x.size(1)**0.5), int(x.size(1)**0.5))
+        breakpoint()
+        x = x.reshape((bsz, self.upsample_size, self.upsample_size, 2))
         x = self.upsample_conv1(x)
-        x = self.upsample_conv2(x)
         x = self.residual_blocks(x)
         x = self.out_conv(x)
         return x
@@ -122,9 +125,9 @@ class GeneratorModule(pl.LightningModule):
 
     def training_step(self, batch):
         image, caption = batch
-        caption_enc = self.sentence_encoder.encode(caption)
+        caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption))
         preds = self.generator(image, caption_enc)
-        loss = self.loss_fn()
+        loss = self.loss_fn(preds, image)
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
