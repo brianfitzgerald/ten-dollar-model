@@ -1,12 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-import lightning.pytorch as pl
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from lightning.pytorch.tuner import Tuner
-from lightning.pytorch.loggers.wandb import WandbLogger
-from lightning.pytorch.loggers import CSVLogger
 import torchvision.transforms as transforms
 import fire
 from sentence_transformers import SentenceTransformer, util
@@ -35,6 +31,7 @@ class ResidualBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x):
+        breakpoint()
         residual = x
         out = self.upsample_conv1(x)
         out = self.bn1(out)
@@ -78,6 +75,7 @@ class PixelDataset(Dataset):
 class Generator(nn.Module):
     def __init__(
         self,
+        device: torch.device,
         noise_emb_size: int = 5,
         out_size: int = 16,
         num_colors: int = 256,
@@ -88,6 +86,7 @@ class Generator(nn.Module):
         self.noise_emb_size = noise_emb_size
         self.text_emb_size: int = 384
         self.num_colors = num_colors
+        self.device = device
 
         self.upsample1 = nn.Upsample(
             scale_factor=2, mode="bilinear", align_corners=True
@@ -99,16 +98,15 @@ class Generator(nn.Module):
             noise_emb_size + self.text_emb_size, 2 * 2 * num_colors
         )
         self.residual_blocks = nn.Sequential(
-            *[ResidualBlock(3, 3, 7) for x in range(num_residual_blocks)]
+            *[ResidualBlock(4, 4, 4) for _ in range(num_residual_blocks)]
         )
-        self.out_conv = nn.Conv2d(out_size, out_size, out_size)
+        self.out_conv = nn.Conv2d(out_size, out_size, num_colors)
 
     def forward(self, image, caption_enc):
         batch_size = image.shape[0]
-        noise = torch.randn((batch_size, self.noise_emb_size))
-        input_emb = torch.cat([noise, caption_enc], 1).to("cuda")
+        noise = torch.randn((batch_size, self.noise_emb_size)).to(self.device)
+        input_emb = torch.cat([noise, caption_enc], 1).to(self.device)
         x = torch.relu(self.reshape_layer(input_emb))
-        breakpoint()
         x = x.view(batch_size, 2, 2, self.num_colors)
         x = self.upsample1(x)
         x = self.upsample2(x)
@@ -117,31 +115,35 @@ class Generator(nn.Module):
         return x
 
 
-class GeneratorModule(pl.LightningModule):
-    def __init__(self, generator: Generator):
+class GeneratorModule:
+    def __init__(self, device: torch.device, generator: Generator):
         super().__init__()
-        self.generator = generator
+        self.device = device
+        self.generator = generator.to(device)
         self.loss_fn = torch.nn.CrossEntropyLoss()
-        self.save_hyperparameters()
-        self.sentence_encoder = SentenceTransformer(
-            "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
-        ).eval()
+        self.sentence_encoder = (
+            SentenceTransformer("sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
+            .to(device)
+            .eval()
+        )
         for param in self.sentence_encoder.parameters():
             param.requires_grad = False
 
     def training_step(self, batch):
         image, caption = batch
-        caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption))
+        image = image.to(self.device)
+        caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
+            self.device
+        )
+        breakpoint()
         preds = self.generator(image, caption_enc)
         loss = self.loss_fn(preds, image)
-        self.log("train_loss", loss, prog_bar=True)
         return loss
 
     def test_step(self, batch):
         users, items, ratings = batch
         preds = self.generator(users, items)
         loss = self.loss_fn(preds.squeeze(1), ratings)
-        self.log("test_loss", loss, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
@@ -156,16 +158,11 @@ def main(use_wandb: bool = False):
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
-    train_dataloader = DataLoader(train_dataset, batch_size=16, num_workers=1)
-    model = GeneratorModule(Generator())
-    logger = None
-    if use_wandb:
-        logger = WandbLogger(project="recsys")
-        logger.watch(model)
-    else:
-        logger = None
-    trainer = pl.Trainer(logger=logger)
-    trainer.fit(model=model, train_dataloaders=train_dataloader)
+    train_dataloader = DataLoader(train_dataset, batch_size=2, num_workers=16)
+    device = torch.device("cuda")
+    model = GeneratorModule(device, Generator(device))
+    for i, batch in enumerate(train_dataloader):
+        model.training_step(batch)
 
 
 if __name__ == "__main__":
