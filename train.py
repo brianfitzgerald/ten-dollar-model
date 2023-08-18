@@ -96,7 +96,7 @@ class Generator(nn.Module):
         self.residual_blocks = nn.Sequential(
             *[ResidualBlock(self.num_colors, self.num_colors) for _ in range(num_residual_blocks)]
         )
-        self.out_conv = nn.Conv2d(out_size, out_size, num_colors)
+        self.out_conv = nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=1)
 
     def forward(self, image, caption_enc):
         batch_size = image.shape[0]
@@ -107,8 +107,8 @@ class Generator(nn.Module):
         x = self.upsample1(x)
         # x = x.view(batch_size, 4, 4, self.num_colors)
         x = self.residual_blocks(x)
-        x = x.view(batch_size, self.out_size, self.out_size, self.num_colors)
         x = self.out_conv(x)
+        breakpoint()
         return x
 
 
@@ -133,6 +133,7 @@ class GeneratorModule:
             self.device
         )
         preds = self.generator(image, caption_enc)
+        breakpoint()
         loss = self.loss_fn(preds, image)
         return loss
 
