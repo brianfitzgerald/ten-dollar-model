@@ -18,9 +18,10 @@ torch.manual_seed(0)
 
 color_bank = torch.tensor([hex_to_rgb(x) for x in color_bank_hex])
 
+
 class ResidualBlock(nn.Module):
     def __init__(
-        self, in_channels: int, out_channels: int, kernel_size: int=3, stride: int = 1
+        self, in_channels: int, out_channels: int, kernel_size: int = 7, stride: int = 1
     ) -> None:
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(
@@ -45,12 +46,16 @@ class ResidualBlock(nn.Module):
 
 
 def encode_image(image: Image.Image, num_colors: int):
-    image_tensor = torch.tensor(np.array(image) / 255.0, dtype=torch.float32)  # Convert to tensor
+    image_tensor = torch.tensor(
+        np.array(image) / 255.0, dtype=torch.float32
+    )  # Convert to tensor
     height, width = image.size
 
     expanded_colors = color_bank.view(num_colors, 1, 1, 3)
     expanded_image = image_tensor.view(1, height, width, 3)
-    distances = torch.norm(expanded_image - expanded_colors, dim=3)  # Euclidean distances
+    distances = torch.norm(
+        expanded_image - expanded_colors, dim=3
+    )  # Euclidean distances
 
     nearest_color_indices = torch.argmin(distances, dim=0).float()
 
@@ -97,14 +102,19 @@ class Generator(nn.Module):
         self.device = device
         self.out_size = out_size
 
-        self.upsample1 = nn.Upsample(scale_factor=2, mode='bilinear')
+        self.upsample1 = nn.Upsample(scale_factor=2, mode="bilinear")
         self.reshape_layer = nn.Linear(
             noise_emb_size + self.text_emb_size, 2 * 2 * num_colors
         )
         self.residual_blocks = nn.Sequential(
-            *[ResidualBlock(self.num_colors, self.num_colors) for _ in range(num_residual_blocks)]
+            *[
+                ResidualBlock(self.num_colors, self.num_colors)
+                for _ in range(num_residual_blocks)
+            ]
         )
-        self.out_conv = nn.ConvTranspose2d(self.num_colors, self.num_colors, kernel_size=4, stride=4, padding=0)
+        self.out_conv = nn.ConvTranspose2d(
+            self.num_colors, self.num_colors, kernel_size=4, stride=4, padding=0
+        )
 
     def forward(self, image, caption_enc):
         batch_size = image.shape[0]
@@ -139,10 +149,15 @@ class GeneratorModule(nn.Module):
             self.device
         )
         preds = self.generator(image, caption_enc)
-        preds_reshaped = preds.permute(0,2,3,1).reshape(-1, self.generator.num_colors).to(self.device)
+        preds_reshaped = (
+            preds.permute(0, 2, 3, 1)
+            .reshape(-1, self.generator.num_colors)
+            .to(self.device)
+        )
         image_reshaped = image.view(-1).type(torch.LongTensor).to(self.device)
         loss = self.loss_fn(preds_reshaped, image_reshaped)
         return loss
+
 
 def main(use_wandb: bool = False, num_epochs: int = 5):
     dataset = PixelDataset("./spritesheets/food")
@@ -161,7 +176,6 @@ def main(use_wandb: bool = False, num_epochs: int = 5):
             loss.backward()
             print(loss)
             optimizer.step()
-            
 
 
 if __name__ == "__main__":
