@@ -143,31 +143,32 @@ class GeneratorModule(nn.Module):
             self.device
         )
         preds = self.generator(image, caption_enc)
-        breakpoint()
         image_classes = image.argmax(dim=-1)
         
-        loss = self.loss_fn(preds, image_classes)
+        loss = self.loss_fn(torch.log(preds), image_classes)
         return loss
 
 
-def main(use_wandb: bool = False, num_epochs: int = 5):
-    dataset = PixelDataset("./spritesheets/food", 32)
+def main(use_wandb: bool = False, num_epochs: int = 50):
+    num_colors = 16
+    dataset = PixelDataset("./spritesheets/food", num_colors)
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
     train_dataloader = DataLoader(
-        train_dataset, batch_size=8, num_workers=1, shuffle=True
+        train_dataset, batch_size=8, num_workers=1
     )
     device = torch.device("cuda")
-    model = GeneratorModule(device, Generator(device, num_colors=32))
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    model = GeneratorModule(device, Generator(device, num_colors=num_colors))
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
             loss = model.training_step(batch)
             loss.backward()
-            print(loss)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            print(loss.item())
             optimizer.step()
 
 
