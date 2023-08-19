@@ -163,3 +163,4 @@ spritesheets/
 lightning_logs/
 
 *.npy
+wandb

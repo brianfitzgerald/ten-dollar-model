@@ -10,13 +10,11 @@ from torchvision.datasets import ImageFolder
 from torch.utils.data import Dataset
 import os
 from PIL import Image
-from torchvision.transforms import ToTensor
+from torchvision.transforms import ToPILImage
 import numpy as np
-from color_bank import color_bank_hex, hex_to_rgb
+import wandb
 
 torch.manual_seed(0)
-
-color_bank = [hex_to_rgb(x) for x in color_bank_hex]
 
 
 def encode_image(image: Image.Image, num_colors: int, palette_img: Image.Image):
@@ -123,7 +121,9 @@ class Generator(nn.Module):
 
 
 class GeneratorModule(nn.Module):
-    def __init__(self, device: torch.device, generator: Generator):
+    def __init__(
+        self, device: torch.device, generator: Generator, use_wandb: bool = False
+    ):
         super().__init__()
         self.device = device
         self.generator = generator.to(device)
@@ -133,6 +133,11 @@ class GeneratorModule(nn.Module):
             .to(device)
             .eval()
         )
+        self.use_wandb = use_wandb
+        self.results_table = None
+        if self.use_wandb:
+            wandb.watch(self.generator)
+            self.results_table = wandb.Table(columns=["image", "sample"])
         for param in self.sentence_encoder.parameters():
             param.requires_grad = False
 
@@ -144,32 +149,50 @@ class GeneratorModule(nn.Module):
         )
         preds = self.generator(image, caption_enc)
         image_classes = image.argmax(dim=-1)
-        
         loss = self.loss_fn(torch.log(preds), image_classes)
+        if self.use_wandb:
+            wandb.log({"loss": loss.item()})
+        print(loss.item())
         return loss
+
+    def eval_step(self, batch):
+        image, caption = batch
+        image = image.to(self.device)
+        caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
+            self.device
+        )
+        preds = self.generator(image, caption_enc)
+        preds = preds.argmax(dim=-1)
+        image = image.argmax(dim=-1)
+        if self.use_wandb:
+            self.results_table.add_data([ToPILImage()(image), ToPILImage()(preds)])
+            wandb.log({"results": self.results_table})
 
 
 def main(use_wandb: bool = False, num_epochs: int = 50):
     num_colors = 16
+    if use_wandb:
+        wandb.init(project="ten-dollar-model")
     dataset = PixelDataset("./spritesheets/food", num_colors)
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=8, num_workers=1
-    )
+    train_dataloader = DataLoader(train_dataset, batch_size=8, num_workers=1)
+    test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=1)
     device = torch.device("cuda")
-    model = GeneratorModule(device, Generator(device, num_colors=num_colors))
+    model = GeneratorModule(device, Generator(device, num_colors=num_colors), use_wandb)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
             loss = model.training_step(batch)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
-            print(loss.item())
             optimizer.step()
+        for j, batch in enumerate(test_dataloader):
+            model.eval_step(batch)
+            break
 
 
 if __name__ == "__main__":
