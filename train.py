@@ -11,9 +11,12 @@ from torch.utils.data import Dataset
 import os
 from PIL import Image
 from torchvision.transforms import ToTensor
+import numpy as np
+from color_bank import color_bank_hex, hex_to_rgb
 
 torch.manual_seed(0)
 
+color_bank = torch.tensor([hex_to_rgb(x) for x in color_bank_hex])
 
 class ResidualBlock(nn.Module):
     def __init__(
@@ -41,10 +44,23 @@ class ResidualBlock(nn.Module):
         return out
 
 
+def one_hot_encode_image(image: Image.Image):
+    image_tensor = torch.tensor(np.array(image) / 255.0, dtype=torch.float32)  # Convert to tensor
+    height, width = image.size
+
+    expanded_colors = color_bank.view(256, 1, 1, 3)
+    expanded_image = image_tensor.view(1, height, width, 3)
+    distances = torch.norm(expanded_image - expanded_colors, dim=3)  # Euclidean distances
+
+    nearest_color_indices = torch.argmin(distances, dim=0)
+
+    one_hot_encoded = F.one_hot(nearest_color_indices, num_classes=256).permute(2, 0, 1).float()
+    return one_hot_encoded
+
+
 class PixelDataset(Dataset):
-    def __init__(self, data_root, num_colors: int = 256, transform=None):
+    def __init__(self, data_root, num_colors: int = 256):
         self.data_root = data_root
-        self.transform = transform
         self.image_list = [
             filename for filename in os.listdir(data_root) if filename.endswith(".png")
         ]
@@ -57,19 +73,12 @@ class PixelDataset(Dataset):
         image_filename = self.image_list[idx]
         image_path = os.path.join(self.data_root, image_filename)
 
-        image = Image.open(image_path)
-        image_tensor = ToTensor()(image).unsqueeze(0)
-
-        one_hot_encoded = F.one_hot(
-            image_tensor.to(torch.int64), num_classes=self.num_colors
-        )
+        image = Image.open(image_path).convert("RGB")
+        image_tensor = one_hot_encode_image(image)
 
         image_name = os.path.splitext(image_filename)[0]
 
-        if self.transform:
-            one_hot_encoded = self.transform(one_hot_encoded)
-
-        return one_hot_encoded, image_name
+        return image_tensor, image_name
 
 
 class Generator(nn.Module):
@@ -96,7 +105,7 @@ class Generator(nn.Module):
         self.residual_blocks = nn.Sequential(
             *[ResidualBlock(self.num_colors, self.num_colors) for _ in range(num_residual_blocks)]
         )
-        self.out_conv = nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.out_conv = nn.ConvTranspose2d(self.num_colors, self.num_colors, kernel_size=4, stride=4, padding=0)
 
     def forward(self, image, caption_enc):
         batch_size = image.shape[0]
@@ -105,13 +114,12 @@ class Generator(nn.Module):
         x = torch.relu(self.reshape_layer(input_emb))
         x = x.view(batch_size, self.num_colors, 2, 2)
         x = self.upsample1(x)
-        # x = x.view(batch_size, 4, 4, self.num_colors)
         x = self.residual_blocks(x)
         x = self.out_conv(x)
         return x
 
 
-class GeneratorModule:
+class GeneratorModule(nn.Module):
     def __init__(self, device: torch.device, generator: Generator):
         super().__init__()
         self.device = device
@@ -133,22 +141,9 @@ class GeneratorModule:
             self.device
         )
         preds = self.generator(image, caption_enc)
-        preds_reshaped = torch.reshape(preds, (batch_size, -1, 256)).to(torch.bfloat16)
-        img_reshaped = torch.reshape(image, (batch_size, 1024, 256)).to(torch.bfloat16)
         breakpoint()
-        loss = self.loss_fn(img_reshaped, preds_reshaped)
+        loss = self.loss_fn(image, preds)
         return loss
-
-    def test_step(self, batch):
-        users, items, ratings = batch
-        preds = self.generator(users, items)
-        loss = self.loss_fn(preds.squeeze(1), ratings)
-        return loss
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
-
 
 def main(use_wandb: bool = False):
     dataset = PixelDataset("./spritesheets/food")
@@ -160,8 +155,13 @@ def main(use_wandb: bool = False):
     train_dataloader = DataLoader(train_dataset, batch_size=16, num_workers=16)
     device = torch.device("cuda")
     model = GeneratorModule(device, Generator(device))
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     for i, batch in enumerate(train_dataloader):
-        model.training_step(batch)
+        loss = model.training_step(batch)
+        loss.backward()
+        print(loss)
+        optimizer.step()
+        
 
 
 if __name__ == "__main__":

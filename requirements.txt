@@ -5,3 +5,4 @@ datasets
 wandb
 fire
 sentence-transformers
+numpy
