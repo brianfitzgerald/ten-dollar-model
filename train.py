@@ -19,6 +19,37 @@ torch.manual_seed(0)
 color_bank = [hex_to_rgb(x) for x in color_bank_hex]
 
 
+def encode_image(image: Image.Image, num_colors: int, palette_img: Image.Image):
+    quantized_image = image.quantize(colors=num_colors, palette=palette_img)
+    quantized_image_tensor = torch.from_numpy(np.array(quantized_image)).long()
+    one_hot_encoded = F.one_hot(quantized_image_tensor, num_colors)
+    return one_hot_encoded
+
+
+class PixelDataset(Dataset):
+    def __init__(self, data_root, num_colors: int = 16):
+        self.data_root = data_root
+        self.image_list = [
+            filename for filename in os.listdir(data_root) if filename.endswith(".png")
+        ]
+        self.num_colors: int = num_colors
+        self.palette_img: Image.Image = Image.open("./palette.png").convert("P")
+
+    def __len__(self):
+        return len(self.image_list)
+
+    def __getitem__(self, idx):
+        image_filename = self.image_list[idx]
+        image_path = os.path.join(self.data_root, image_filename)
+
+        image = Image.open(image_path).convert("RGB")
+        image_tensor = encode_image(image, self.num_colors, self.palette_img)
+
+        image_name = os.path.splitext(image_filename)[0]
+
+        return image_tensor, image_name
+
+
 class ResidualBlock(nn.Module):
     def __init__(
         self, num_filters: int = 128, kernel_size: int = 7, upsampling=False
@@ -43,45 +74,12 @@ class ResidualBlock(nn.Module):
         return residual + x
 
 
-def encode_image(image: Image.Image, num_colors: int, palette_img: Image.Image):
-    quantized_image = image.quantize(colors=num_colors, palette=palette_img)
-    quantized_image_tensor = torch.from_numpy(np.array(quantized_image)).long()
-    one_hot_encoded = F.one_hot(quantized_image_tensor, num_colors)
-
-    return one_hot_encoded
-
-
-class PixelDataset(Dataset):
-    def __init__(self, data_root, num_colors: int = 16):
-        self.data_root = data_root
-        self.image_list = [
-            filename for filename in os.listdir(data_root) if filename.endswith(".png")
-        ]
-        self.num_colors: int = num_colors
-        self.palette_img: Image.Image = Image.open("./palette.png").convert("P")
-
-    def __len__(self):
-        return len(self.image_list)
-
-    def __getitem__(self, idx):
-        image_filename = self.image_list[idx]
-        image_path = os.path.join(self.data_root, image_filename)
-
-        image = Image.open(image_path).convert("RGB")
-        one_hot_image_tensor = encode_image(image, self.num_colors, self.palette_img)
-        print(one_hot_image_tensor.shape)
-
-        image_name = os.path.splitext(image_filename)[0]
-
-        return one_hot_image_tensor, image_name
-
-
 class Generator(nn.Module):
     def __init__(
         self,
         device: torch.device,
         noise_emb_size: int = 5,
-        out_size: int = 16,
+        num_colors: int = 16,
         num_filters: int = 128,
         num_residual_blocks: int = 6,
         kernel_size: int = 7,
@@ -93,7 +91,7 @@ class Generator(nn.Module):
         self.text_emb_size: int = 384
         self.num_filters = num_filters
         self.device = device
-        self.out_size = out_size
+        self.num_colors = num_colors
         self.conv_size = conv_size
 
         self.reshape_layer = nn.Linear(
@@ -108,7 +106,7 @@ class Generator(nn.Module):
         )
         self.pad = nn.ZeroPad2d(1)
         self.out_conv = nn.Conv2d(
-            in_channels=self.num_filters, out_channels=self.out_size, kernel_size=9
+            in_channels=self.num_filters, out_channels=self.num_colors, kernel_size=3
         )
         self.softmax = nn.Softmax(dim=-1)
 
@@ -119,7 +117,7 @@ class Generator(nn.Module):
         x = self.reshape_layer(input_emb)
         x = x.view(-1, self.num_filters, self.conv_size, self.conv_size)
         x = self.residual_blocks(x)
-        # x = self.pad(x)
+        x = self.pad(x)
         x = self.out_conv(x)
         return self.softmax(x)
 
@@ -146,12 +144,14 @@ class GeneratorModule(nn.Module):
         )
         preds = self.generator(image, caption_enc)
         breakpoint()
-        loss = self.loss_fn(preds, image)
+        image_classes = image.argmax(dim=-1)
+        
+        loss = self.loss_fn(preds, image_classes)
         return loss
 
 
 def main(use_wandb: bool = False, num_epochs: int = 5):
-    dataset = PixelDataset("./spritesheets/food")
+    dataset = PixelDataset("./spritesheets/food", 32)
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
@@ -161,7 +161,7 @@ def main(use_wandb: bool = False, num_epochs: int = 5):
         train_dataset, batch_size=8, num_workers=1, shuffle=True
     )
     device = torch.device("cuda")
-    model = GeneratorModule(device, Generator(device))
+    model = GeneratorModule(device, Generator(device, num_colors=32))
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
