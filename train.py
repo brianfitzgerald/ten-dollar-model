@@ -16,59 +16,49 @@ from color_bank import color_bank_hex, hex_to_rgb
 
 torch.manual_seed(0)
 
-color_bank = torch.tensor([hex_to_rgb(x) for x in color_bank_hex])
+color_bank = [hex_to_rgb(x) for x in color_bank_hex]
 
 
 class ResidualBlock(nn.Module):
     def __init__(
-        self, in_channels: int, out_channels: int, kernel_size: int = 7, stride: int = 1
+        self, num_filters: int = 128, kernel_size: int = 7, upsampling=False
     ) -> None:
         super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(
-            in_channels, out_channels, kernel_size, stride=stride, padding=1
+        self.upsampling = upsampling
+        self.layers = nn.Sequential(
+            nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, padding=3),
+            nn.ReLU(),
+            nn.BatchNorm2d(num_filters),
+            nn.Conv2d(num_filters, num_filters, kernel_size=kernel_size, padding=3),
+            nn.ReLU(),
+            nn.BatchNorm2d(num_filters),
         )
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(
-            out_channels, out_channels, kernel_size, stride=stride, padding=1
-        )
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
 
     def forward(self, x):
+        if self.upsampling:
+            x = self.upsample(x)
         residual = x
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out += residual
-        out = self.relu(out)
-        return out
+        x = self.layers(x)
+        return residual + x
 
 
-def encode_image(image: Image.Image, num_colors: int):
-    image_tensor = torch.tensor(
-        np.array(image) / 255.0, dtype=torch.float32
-    )  # Convert to tensor
-    height, width = image.size
+def encode_image(image: Image.Image, num_colors: int, palette_img: Image.Image):
+    quantized_image = image.quantize(colors=num_colors, palette=palette_img)
+    quantized_image_tensor = torch.from_numpy(np.array(quantized_image)).long()
+    one_hot_encoded = F.one_hot(quantized_image_tensor, num_colors)
 
-    expanded_colors = color_bank.view(num_colors, 1, 1, 3)
-    expanded_image = image_tensor.view(1, height, width, 3)
-    distances = torch.norm(
-        expanded_image - expanded_colors, dim=3
-    )  # Euclidean distances
-
-    nearest_color_indices = torch.argmin(distances, dim=0).float()
-
-    return nearest_color_indices
+    return one_hot_encoded
 
 
 class PixelDataset(Dataset):
-    def __init__(self, data_root, num_colors: int = 256):
+    def __init__(self, data_root, num_colors: int = 16):
         self.data_root = data_root
         self.image_list = [
             filename for filename in os.listdir(data_root) if filename.endswith(".png")
         ]
         self.num_colors: int = num_colors
+        self.palette_img: Image.Image = Image.open("./palette.png").convert("P")
 
     def __len__(self):
         return len(self.image_list)
@@ -78,11 +68,12 @@ class PixelDataset(Dataset):
         image_path = os.path.join(self.data_root, image_filename)
 
         image = Image.open(image_path).convert("RGB")
-        image_tensor = encode_image(image, self.num_colors)
+        one_hot_image_tensor = encode_image(image, self.num_colors, self.palette_img)
+        print(one_hot_image_tensor.shape)
 
         image_name = os.path.splitext(image_filename)[0]
 
-        return image_tensor, image_name
+        return one_hot_image_tensor, image_name
 
 
 class Generator(nn.Module):
@@ -91,41 +82,46 @@ class Generator(nn.Module):
         device: torch.device,
         noise_emb_size: int = 5,
         out_size: int = 16,
-        num_colors: int = 256,
+        num_filters: int = 128,
         num_residual_blocks: int = 6,
+        kernel_size: int = 7,
+        conv_size: int = 4,
     ):
         super().__init__()
 
         self.noise_emb_size = noise_emb_size
         self.text_emb_size: int = 384
-        self.num_colors = num_colors
+        self.num_filters = num_filters
         self.device = device
         self.out_size = out_size
+        self.conv_size = conv_size
 
-        self.upsample1 = nn.Upsample(scale_factor=2, mode="bilinear")
         self.reshape_layer = nn.Linear(
-            noise_emb_size + self.text_emb_size, 2 * 2 * num_colors
+            noise_emb_size + self.text_emb_size,
+            self.conv_size * self.conv_size * num_filters,
         )
         self.residual_blocks = nn.Sequential(
             *[
-                ResidualBlock(self.num_colors, self.num_colors)
-                for _ in range(num_residual_blocks)
+                ResidualBlock(self.num_filters, kernel_size, i < 2)
+                for i in range(num_residual_blocks)
             ]
         )
-        self.out_conv = nn.ConvTranspose2d(
-            self.num_colors, self.num_colors, kernel_size=4, stride=4, padding=0
+        self.pad = nn.ZeroPad2d(1)
+        self.out_conv = nn.Conv2d(
+            in_channels=self.num_filters, out_channels=self.out_size, kernel_size=9
         )
+        self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, image, caption_enc):
         batch_size = image.shape[0]
         noise = torch.randn((batch_size, self.noise_emb_size)).to(self.device)
         input_emb = torch.cat([noise, caption_enc], 1).to(self.device)
-        x = torch.relu(self.reshape_layer(input_emb))
-        x = x.view(batch_size, self.num_colors, 2, 2)
-        x = self.upsample1(x)
+        x = self.reshape_layer(input_emb)
+        x = x.view(-1, self.num_filters, self.conv_size, self.conv_size)
         x = self.residual_blocks(x)
+        # x = self.pad(x)
         x = self.out_conv(x)
-        return x
+        return self.softmax(x)
 
 
 class GeneratorModule(nn.Module):
@@ -133,7 +129,7 @@ class GeneratorModule(nn.Module):
         super().__init__()
         self.device = device
         self.generator = generator.to(device)
-        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.loss_fn = torch.nn.NLLLoss()
         self.sentence_encoder = (
             SentenceTransformer("sentence-transformers/multi-qa-MiniLM-L6-cos-v1")
             .to(device)
@@ -149,13 +145,8 @@ class GeneratorModule(nn.Module):
             self.device
         )
         preds = self.generator(image, caption_enc)
-        preds_reshaped = (
-            preds.permute(0, 2, 3, 1)
-            .reshape(-1, self.generator.num_colors)
-            .to(self.device)
-        )
-        image_reshaped = image.view(-1).type(torch.LongTensor).to(self.device)
-        loss = self.loss_fn(preds_reshaped, image_reshaped)
+        breakpoint()
+        loss = self.loss_fn(preds, image)
         return loss
 
 
@@ -166,7 +157,9 @@ def main(use_wandb: bool = False, num_epochs: int = 5):
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
-    train_dataloader = DataLoader(train_dataset, batch_size=4, num_workers=1)
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=8, num_workers=1, shuffle=True
+    )
     device = torch.device("cuda")
     model = GeneratorModule(device, Generator(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
