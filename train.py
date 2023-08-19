@@ -44,18 +44,17 @@ class ResidualBlock(nn.Module):
         return out
 
 
-def one_hot_encode_image(image: Image.Image):
+def encode_image(image: Image.Image, num_colors: int):
     image_tensor = torch.tensor(np.array(image) / 255.0, dtype=torch.float32)  # Convert to tensor
     height, width = image.size
 
-    expanded_colors = color_bank.view(256, 1, 1, 3)
+    expanded_colors = color_bank.view(num_colors, 1, 1, 3)
     expanded_image = image_tensor.view(1, height, width, 3)
     distances = torch.norm(expanded_image - expanded_colors, dim=3)  # Euclidean distances
 
-    nearest_color_indices = torch.argmin(distances, dim=0)
+    nearest_color_indices = torch.argmin(distances, dim=0).float()
 
-    one_hot_encoded = F.one_hot(nearest_color_indices, num_classes=256).permute(2, 0, 1).float()
-    return one_hot_encoded
+    return nearest_color_indices
 
 
 class PixelDataset(Dataset):
@@ -74,7 +73,7 @@ class PixelDataset(Dataset):
         image_path = os.path.join(self.data_root, image_filename)
 
         image = Image.open(image_path).convert("RGB")
-        image_tensor = one_hot_encode_image(image)
+        image_tensor = encode_image(image, self.num_colors)
 
         image_name = os.path.splitext(image_filename)[0]
 
@@ -135,33 +134,34 @@ class GeneratorModule(nn.Module):
 
     def training_step(self, batch):
         image, caption = batch
-        batch_size = image.shape[0]
         image = image.to(self.device)
         caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
             self.device
         )
         preds = self.generator(image, caption_enc)
-        breakpoint()
-        loss = self.loss_fn(image, preds)
+        preds_reshaped = preds.permute(0,2,3,1).reshape(-1, self.generator.num_colors).to(self.device)
+        image_reshaped = image.view(-1).type(torch.LongTensor).to(self.device)
+        loss = self.loss_fn(preds_reshaped, image_reshaped)
         return loss
 
-def main(use_wandb: bool = False):
+def main(use_wandb: bool = False, num_epochs: int = 5):
     dataset = PixelDataset("./spritesheets/food")
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
-    train_dataloader = DataLoader(train_dataset, batch_size=16, num_workers=16)
+    train_dataloader = DataLoader(train_dataset, batch_size=4, num_workers=1)
     device = torch.device("cuda")
     model = GeneratorModule(device, Generator(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    for i, batch in enumerate(train_dataloader):
-        loss = model.training_step(batch)
-        loss.backward()
-        print(loss)
-        optimizer.step()
-        
+    for i in range(num_epochs):
+        for j, batch in enumerate(train_dataloader):
+            loss = model.training_step(batch)
+            loss.backward()
+            print(loss)
+            optimizer.step()
+            
 
 
 if __name__ == "__main__":
