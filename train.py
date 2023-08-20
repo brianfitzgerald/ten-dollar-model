@@ -20,25 +20,24 @@ from typing import List
 torch.manual_seed(0)
 
 
-def encode_image(image: Image.Image, palette: Image.Image):
-    image_p = image.quantize(palette=palette)
-    quantized_tensor = torch.from_numpy(np.array(image_p)).long()
+def encode_image(image: Image.Image, palette_img: ImagePalette.ImagePalette) -> torch.Tensor:
+    image = image.quantize(palette=palette_img, dither=0)
+    quantized_tensor = torch.from_numpy(np.array(image)).long()
     one_hot_encoded = F.one_hot(quantized_tensor, 256)
     return one_hot_encoded
 
 
-def decode_image_batch(image_tensor: torch.Tensor, palette: Image.Image) -> List[Image.Image]:
+def decode_image_batch(
+    image_tensor_batch: torch.Tensor, palette_img: Image.Image
+) -> List[Image.Image]:
     out_imgs = []
-    for batch_idx in range(image_tensor.shape[0]):
-        image_tensor_sample = image_tensor[batch_idx]
-        image_tensor_sample = image_tensor_sample.argmax(-1)
-        quantized = Image.new(
-            "P", (image_tensor_sample.size(0), image_tensor_sample.size(0))
-        )
-        quantized.putdata(image_tensor_sample.flatten().tolist())
-        quantized.putpalette(palette.palette)
-        quantized = quantized.convert("RGB")
-        out_imgs.append(quantized)
+    for batch_idx in range(image_tensor_batch.shape[0]):
+        img_tensor = image_tensor_batch[batch_idx].cpu()
+        img_tensor = img_tensor.argmax(-1)
+        img_np = img_tensor.numpy().astype(np.uint8)
+        img = Image.fromarray(img_np, mode="P")
+        img.putpalette(palette_img.getpalette())
+        out_imgs.append(img)
     return out_imgs
 
 
@@ -46,7 +45,7 @@ class PixelDataset(Dataset):
     def __init__(
         self,
         data_root,
-        palette: Image.Image,
+        palette_img: Image.Image,
         num_colors: int = 16,
     ):
         self.data_root = data_root
@@ -54,7 +53,7 @@ class PixelDataset(Dataset):
             filename for filename in os.listdir(data_root) if filename.endswith(".png")
         ]
         self.num_colors: int = num_colors
-        self.palette = palette
+        self.palette_img = palette_img
 
     def __len__(self):
         return len(self.image_list)
@@ -64,7 +63,7 @@ class PixelDataset(Dataset):
         image_path = os.path.join(self.data_root, image_filename)
 
         image = Image.open(image_path).convert("RGB")
-        image_tensor = encode_image(image, self.palette)
+        image_tensor = encode_image(image, self.palette_img)
 
         image_name = os.path.splitext(image_filename)[0]
 
@@ -101,7 +100,7 @@ class Generator(nn.Module):
         device: torch.device,
         noise_emb_size: int = 5,
         num_colors: int = 16,
-        num_filters: int = 128,
+        num_filters: int = 256,
         num_residual_blocks: int = 6,
         kernel_size: int = 7,
         conv_size: int = 4,
@@ -190,7 +189,7 @@ class GeneratorModule(nn.Module):
         )
         preds = self.generator(image, caption_enc)
         input_images = decode_image_batch(image, self.palette)
-        preds_reordered = preds.permute(0,2,3,1)
+        preds_reordered = preds.permute(0, 2, 3, 1)
         pred_images = decode_image_batch(preds_reordered, self.palette)
         if self.use_wandb:
             input_images = [wandb.Image(im) for im in input_images]
@@ -198,36 +197,32 @@ class GeneratorModule(nn.Module):
             self.results_table.add_data(input_images, pred_images)
             wandb.log({"results": self.results_table})
         else:
-            Path("debug_images").mkdir(exist_ok=True)
             for i in range(image.shape[0]):
                 input_images[i].save(os.path.join("debug_images", f"input_{i}.png"))
                 pred_images[i].save(os.path.join("debug_images", f"preds_{i}.png"))
 
 
-def main(use_wandb: bool = False, num_epochs: int = 5000, log_every: int = 1):
+def main(use_wandb: bool = False, num_epochs: int = 1000, log_every: int = 100):
     num_colors = 256
     if use_wandb:
         wandb.init(project="ten-dollar-model")
 
-    image = Image.open("./spritesheets/food/Apple Pie.png").convert("RGB")
+    Path("debug_images").mkdir(exist_ok=True)
 
-    red_values = [r for r, _, _ in pico_rgb_palette]
-    green_values = [g for _, g, _ in pico_rgb_palette]
-    blue_values = [b for _, _, b in pico_rgb_palette]
+    custom_palette = np.array(pico_rgb_palette).flatten().tolist()
 
-    # Flattened palette with R values followed by G values and then B values
-    flattened_palette = red_values + green_values + blue_values
+    # while len(custom_palette) < 768:
+    #     custom_palette.extend([0, 0, 0])
 
-    pico_palette = ImagePalette.ImagePalette(
-        palette=flattened_palette, size=len(flattened_palette)
-    )
-    palette_img = Image.new("P", (1, 1))
-    palette_img.putpalette(pico_palette)
+    # Create a 'P' mode image using the custom palette
+    palette_img = Image.new('P', (1, 1))
+    palette_img.putpalette(custom_palette)
 
     # Test encoding / decoding
-    # encoded = encode_image(image, palette_img)
-    # decoded = decode_image_batch(encoded.unsqueeze(0), palette_img.palette)
-    # decoded[0].save(os.path.join("debug_images", "decoded.png"))
+    enc_test_image = Image.open("./spritesheets/food/Wine.png").convert("RGB")
+    encoded = encode_image(enc_test_image, palette_img)
+    decoded = decode_image_batch(encoded.unsqueeze(0), palette_img)
+    decoded[0].save(os.path.join("debug_images", "decoded.png"))
 
     dataset = PixelDataset("./spritesheets/food", palette_img, num_colors)
     train_size = int(0.9 * len(dataset))
@@ -236,8 +231,8 @@ def main(use_wandb: bool = False, num_epochs: int = 5000, log_every: int = 1):
         dataset, [train_size, test_size]
     )
     # test encoding / decoding
-    train_dataloader = DataLoader(train_dataset, batch_size=32, num_workers=1)
-    test_dataloader = DataLoader(test_dataset, batch_size=32, num_workers=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=8, num_workers=1)
+    test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=1)
     device = torch.device("cuda")
     model = GeneratorModule(
         device, Generator(device, num_colors=num_colors), palette_img, use_wandb
