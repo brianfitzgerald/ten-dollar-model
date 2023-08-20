@@ -27,7 +27,7 @@ def encode_image(image: Image.Image, palette: Image.Image):
     return one_hot_encoded
 
 
-def decode_image_batch(image_tensor: torch.Tensor, palette: Image.Image):
+def decode_image_batch(image_tensor: torch.Tensor, palette: Image.Image) -> List[Image.Image]:
     out_imgs = []
     for batch_idx in range(image_tensor.shape[0]):
         image_tensor_sample = image_tensor[batch_idx]
@@ -189,11 +189,13 @@ class GeneratorModule(nn.Module):
             self.device
         )
         preds = self.generator(image, caption_enc)
-        input_images: torch.Tensor = decode_image_batch(image, self.palette)
+        input_images = decode_image_batch(image, self.palette)
         preds_reordered = preds.permute(0,2,3,1)
         pred_images = decode_image_batch(preds_reordered, self.palette)
         if self.use_wandb:
-            self.results_table.add_data([input_images, pred_images])
+            input_images = [wandb.Image(im) for im in input_images]
+            pred_images = [wandb.Image(im) for im in pred_images]
+            self.results_table.add_data(input_images, pred_images)
             wandb.log({"results": self.results_table})
         else:
             Path("debug_images").mkdir(exist_ok=True)
@@ -202,7 +204,7 @@ class GeneratorModule(nn.Module):
                 pred_images[i].save(os.path.join("debug_images", f"preds_{i}.png"))
 
 
-def main(use_wandb: bool = False, num_epochs: int = 50):
+def main(use_wandb: bool = False, num_epochs: int = 5000, log_every: int = 1):
     num_colors = 256
     if use_wandb:
         wandb.init(project="ten-dollar-model")
@@ -228,19 +230,19 @@ def main(use_wandb: bool = False, num_epochs: int = 50):
     # decoded[0].save(os.path.join("debug_images", "decoded.png"))
 
     dataset = PixelDataset("./spritesheets/food", palette_img, num_colors)
-    train_size = int(0.8 * len(dataset))
+    train_size = int(0.9 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
     # test encoding / decoding
-    train_dataloader = DataLoader(train_dataset, batch_size=8, num_workers=1)
-    test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=32, num_workers=1)
+    test_dataloader = DataLoader(test_dataset, batch_size=32, num_workers=1)
     device = torch.device("cuda")
     model = GeneratorModule(
         device, Generator(device, num_colors=num_colors), palette_img, use_wandb
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
             loss = model.training_step(batch)
@@ -248,9 +250,10 @@ def main(use_wandb: bool = False, num_epochs: int = 50):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
             optimizer.step()
-        for j, batch in enumerate(test_dataloader):
-            model.eval_step(batch)
-            break
+        if i % log_every == 0:
+            for j, batch in enumerate(test_dataloader):
+                model.eval_step(batch)
+                break
 
 
 if __name__ == "__main__":
