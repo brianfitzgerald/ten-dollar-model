@@ -33,7 +33,7 @@ def decode_image_batch(image_tensor: torch.Tensor, palette: Image.Image):
         image_tensor_sample = image_tensor[batch_idx]
         image_tensor_sample = image_tensor_sample.argmax(-1)
         quantized = Image.new(
-            "P", (image_tensor_sample.size(1), image_tensor_sample.size(0))
+            "P", (image_tensor_sample.size(0), image_tensor_sample.size(0))
         )
         quantized.putdata(image_tensor_sample.flatten().tolist())
         quantized.putpalette(palette.palette)
@@ -189,16 +189,17 @@ class GeneratorModule(nn.Module):
             self.device
         )
         preds = self.generator(image, caption_enc)
-        input_images = decode_image_batch(image, self.palette)
-        pred_images = decode_image_batch(preds, self.palette)
+        input_images: torch.Tensor = decode_image_batch(image, self.palette)
+        preds_reordered = preds.permute(0,2,3,1)
+        pred_images = decode_image_batch(preds_reordered, self.palette)
         if self.use_wandb:
             self.results_table.add_data([input_images, pred_images])
             wandb.log({"results": self.results_table})
         else:
             Path("debug_images").mkdir(exist_ok=True)
             for i in range(image.shape[0]):
-                pred_images[i].save(os.path.join("debug_images", f"preds_{i}.png"))
                 input_images[i].save(os.path.join("debug_images", f"input_{i}.png"))
+                pred_images[i].save(os.path.join("debug_images", f"preds_{i}.png"))
 
 
 def main(use_wandb: bool = False, num_epochs: int = 50):
@@ -221,9 +222,10 @@ def main(use_wandb: bool = False, num_epochs: int = 50):
     palette_img = Image.new("P", (1, 1))
     palette_img.putpalette(pico_palette)
 
-    encoded = encode_image(image, palette_img)
-    decoded = decode_image_batch(encoded.unsqueeze(0), palette_img.palette)
-    decoded[0].save(os.path.join("debug_images", "decoded.png"))
+    # Test encoding / decoding
+    # encoded = encode_image(image, palette_img)
+    # decoded = decode_image_batch(encoded.unsqueeze(0), palette_img.palette)
+    # decoded[0].save(os.path.join("debug_images", "decoded.png"))
 
     dataset = PixelDataset("./spritesheets/food", palette_img, num_colors)
     train_size = int(0.8 * len(dataset))
