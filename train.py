@@ -14,24 +14,30 @@ from torchvision.transforms import ToPILImage
 import numpy as np
 import wandb
 from pathlib import Path
+from color_bank import pico_rgb_palette
+from typing import List
 
 torch.manual_seed(0)
 
 
-def encode_image(image: Image.Image, num_colors: int, palette_img: Image.Image):
-    quantized_image = image.quantize(colors=num_colors, palette=palette_img)
-    quantized_image_tensor = torch.from_numpy(np.array(quantized_image)).long()
-    one_hot_encoded = F.one_hot(quantized_image_tensor, num_colors)
+def encode_image(image: Image.Image, num_colors: int):
+    quantized_image = image.quantize(colors=num_colors, method=None, kmeans=0, palette=None)
+    quantized_tensor = torch.from_numpy(np.array(quantized_image)).long()
+    one_hot_encoded = F.one_hot(quantized_tensor, num_colors)
     return one_hot_encoded
 
 
-def decode_image_batch(image_tensor: torch.Tensor, palette_img: Image.Image):
+
+def decode_image_batch(image_tensor: torch.Tensor, palette: Image.Image):
     out_imgs = []
     for batch_idx in range(image_tensor.shape[0]):
-        image_tensor_sample = image_tensor[0].argmax(-1)
-        img = Image.fromarray(image_tensor_sample.cpu().numpy(), mode="P")
-        img.putpalette(palette_img.getpalette())
-        out_imgs.append(img)
+        image_tensor_sample = image_tensor[batch_idx]
+        image_tensor_sample = image_tensor_sample.argmax(-1)
+        quantized = Image.new('P', (image_tensor_sample.size(1), image_tensor_sample.size(0)))
+        quantized.putdata(image_tensor_sample.flatten().tolist())
+        quantized.putpalette(palette.palette)
+        quantized = quantized.convert("RGB")
+        out_imgs.append(quantized)
     return out_imgs
 
 
@@ -57,7 +63,7 @@ class PixelDataset(Dataset):
         image_path = os.path.join(self.data_root, image_filename)
 
         image = Image.open(image_path).convert("RGB")
-        image_tensor = encode_image(image, self.num_colors, self.palette_img)
+        image_tensor = encode_image(image, self.num_colors)
 
         image_name = os.path.splitext(image_filename)[0]
 
@@ -206,6 +212,17 @@ def main(use_wandb: bool = False, num_epochs: int = 50):
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
+    # test encoding / decoding
+    image = Image.open('./spritesheets/food/Brocolli.png').convert("RGB")
+    palette_img = Image.new("P", (1,1))
+    flattened_palette = torch.tensor(pico_rgb_palette).flatten()
+    palette_img.putpalette(flattened_palette)
+
+    encoded = encode_image(image, num_colors)
+    decoded = decode_image_batch(encoded.unsqueeze(0), palette_img)
+    decoded[0].save(os.path.join("debug_images", "decoded.png"))
+    print("saved debug decoding")
+
     train_dataloader = DataLoader(train_dataset, batch_size=8, num_workers=1)
     test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=1)
     device = torch.device("cuda")
