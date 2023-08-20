@@ -13,6 +13,7 @@ from PIL import Image
 from torchvision.transforms import ToPILImage
 import numpy as np
 import wandb
+from pathlib import Path
 
 torch.manual_seed(0)
 
@@ -24,14 +25,29 @@ def encode_image(image: Image.Image, num_colors: int, palette_img: Image.Image):
     return one_hot_encoded
 
 
+def decode_image_batch(image_tensor: torch.Tensor, palette_img: Image.Image):
+    out_imgs = []
+    for batch_idx in range(image_tensor.shape[0]):
+        image_tensor_sample = image_tensor[0].argmax(-1)
+        img = Image.fromarray(image_tensor_sample.cpu().numpy(), mode="P")
+        img.putpalette(palette_img.getpalette())
+        out_imgs.append(img)
+    return out_imgs
+
+
 class PixelDataset(Dataset):
-    def __init__(self, data_root, num_colors: int = 16):
+    def __init__(
+        self,
+        data_root,
+        palette_img: Image.Image,
+        num_colors: int = 16,
+    ):
         self.data_root = data_root
         self.image_list = [
             filename for filename in os.listdir(data_root) if filename.endswith(".png")
         ]
         self.num_colors: int = num_colors
-        self.palette_img: Image.Image = Image.open("./palette.png").convert("P")
+        self.palette_img = palette_img
 
     def __len__(self):
         return len(self.image_list)
@@ -122,7 +138,11 @@ class Generator(nn.Module):
 
 class GeneratorModule(nn.Module):
     def __init__(
-        self, device: torch.device, generator: Generator, use_wandb: bool = False
+        self,
+        device: torch.device,
+        generator: Generator,
+        palette_img: Image.Image,
+        use_wandb: bool = False,
     ):
         super().__init__()
         self.device = device
@@ -140,6 +160,7 @@ class GeneratorModule(nn.Module):
             self.results_table = wandb.Table(columns=["image", "sample"])
         for param in self.sentence_encoder.parameters():
             param.requires_grad = False
+        self.palette_img: Image.Image = palette_img
 
     def training_step(self, batch):
         image, caption = batch
@@ -162,18 +183,24 @@ class GeneratorModule(nn.Module):
             self.device
         )
         preds = self.generator(image, caption_enc)
-        preds = preds.argmax(dim=-1)
-        image = image.argmax(dim=-1)
+        input_images = decode_image_batch(image, self.palette_img)
+        pred_images = decode_image_batch(preds, self.palette_img)
         if self.use_wandb:
-            self.results_table.add_data([ToPILImage()(image), ToPILImage()(preds)])
+            self.results_table.add_data([input_images, pred_images])
             wandb.log({"results": self.results_table})
+        else:
+            Path("debug_images").mkdir(exist_ok=True)
+            for i in range(image.shape[0]):
+                pred_images[i].save(os.path.join("debug_images", f"preds_{i}.png"))
+                input_images[i].save(os.path.join("debug_images", f"input_{i}.png"))
 
 
 def main(use_wandb: bool = False, num_epochs: int = 50):
     num_colors = 16
     if use_wandb:
         wandb.init(project="ten-dollar-model")
-    dataset = PixelDataset("./spritesheets/food", num_colors)
+    palette_img: Image.Image = Image.open("./palette.png").convert("P")
+    dataset = PixelDataset("./spritesheets/food", palette_img, num_colors)
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
@@ -182,7 +209,9 @@ def main(use_wandb: bool = False, num_epochs: int = 50):
     train_dataloader = DataLoader(train_dataset, batch_size=8, num_workers=1)
     test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=1)
     device = torch.device("cuda")
-    model = GeneratorModule(device, Generator(device, num_colors=num_colors), use_wandb)
+    model = GeneratorModule(
+        device, Generator(device, num_colors=num_colors), palette_img, use_wandb
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):

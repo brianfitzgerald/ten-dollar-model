@@ -164,3 +164,4 @@ lightning_logs/
 
 *.npy
 wandb
+debug_images
