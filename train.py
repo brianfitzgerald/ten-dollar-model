@@ -20,7 +20,9 @@ from typing import List
 torch.manual_seed(0)
 
 
-def encode_image(image: Image.Image, palette_img: ImagePalette.ImagePalette) -> torch.Tensor:
+def encode_image(
+    image: Image.Image, palette_img: ImagePalette.ImagePalette
+) -> torch.Tensor:
     image = image.quantize(palette=palette_img, dither=0)
     quantized_tensor = torch.from_numpy(np.array(image)).long()
     one_hot_encoded = F.one_hot(quantized_tensor, 256)
@@ -41,6 +43,23 @@ def decode_image_batch(
     return out_imgs
 
 
+def image_grid(image_list: List[List[Image.Image]]) -> Image.Image:
+    num_rows, num_cols = len(image_list), len(image_list[0])
+    image_width, image_height = image_list[0][0].size
+
+    grid_width = num_cols * image_width
+    grid_height = num_rows * image_height
+
+    grid_image = Image.new("RGB", (grid_width, grid_height))
+
+    for row in range(num_rows):
+        for col in range(num_cols):
+            x_offset = col * image_width
+            y_offset = row * image_height
+            grid_image.paste(image_list[row][col], (x_offset, y_offset))
+    return grid_image
+
+
 class PixelDataset(Dataset):
     def __init__(
         self,
@@ -54,6 +73,13 @@ class PixelDataset(Dataset):
         ]
         self.num_colors: int = num_colors
         self.palette_img = palette_img
+        self.transforms = transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.RandomRotation(90),
+            ]
+        )
 
     def __len__(self):
         return len(self.image_list)
@@ -63,6 +89,7 @@ class PixelDataset(Dataset):
         image_path = os.path.join(self.data_root, image_filename)
 
         image = Image.open(image_path).convert("RGB")
+        image = self.transforms(image)
         image_tensor = encode_image(image, self.palette_img)
 
         image_name = os.path.splitext(image_filename)[0]
@@ -100,8 +127,8 @@ class Generator(nn.Module):
         device: torch.device,
         noise_emb_size: int = 5,
         num_colors: int = 16,
-        num_filters: int = 256,
-        num_residual_blocks: int = 6,
+        num_filters: int = 512,
+        num_residual_blocks: int = 8,
         kernel_size: int = 7,
         conv_size: int = 4,
     ):
@@ -164,7 +191,7 @@ class GeneratorModule(nn.Module):
         self.palette = palette
         if self.use_wandb:
             wandb.watch(self.generator)
-            self.results_table = wandb.Table(columns=["image", "sample"])
+            self.results_table = wandb.Table(columns=["results"])
         for param in self.sentence_encoder.parameters():
             param.requires_grad = False
 
@@ -181,7 +208,7 @@ class GeneratorModule(nn.Module):
             wandb.log({"loss": loss.item()})
         return loss
 
-    def eval_step(self, batch):
+    def eval_step(self, batch, epoch: int):
         image, caption = batch
         image = image.to(self.device)
         caption_enc = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
@@ -191,18 +218,17 @@ class GeneratorModule(nn.Module):
         input_images = decode_image_batch(image, self.palette)
         preds_reordered = preds.permute(0, 2, 3, 1)
         pred_images = decode_image_batch(preds_reordered, self.palette)
+        results_grid = image_grid([input_images, pred_images])
         if self.use_wandb:
-            input_images = [wandb.Image(im) for im in input_images]
-            pred_images = [wandb.Image(im) for im in pred_images]
-            self.results_table.add_data(input_images, pred_images)
+            self.results_table.add_data([wandb.Image(results_grid)])
             wandb.log({"results": self.results_table})
         else:
-            for i in range(image.shape[0]):
-                input_images[i].save(os.path.join("debug_images", f"input_{i}.png"))
-                pred_images[i].save(os.path.join("debug_images", f"preds_{i}.png"))
+            results_grid.save(
+                os.path.join("debug_images", f"results_epoch_{epoch}.png")
+            )
 
 
-def main(use_wandb: bool = False, num_epochs: int = 1000, log_every: int = 100):
+def main(use_wandb: bool = False, num_epochs: int = 1000, eval_every: int = 5):
     num_colors = 256
     if use_wandb:
         wandb.init(project="ten-dollar-model")
@@ -215,7 +241,7 @@ def main(use_wandb: bool = False, num_epochs: int = 1000, log_every: int = 100):
     #     custom_palette.extend([0, 0, 0])
 
     # Create a 'P' mode image using the custom palette
-    palette_img = Image.new('P', (1, 1))
+    palette_img = Image.new("P", (1, 1))
     palette_img.putpalette(custom_palette)
 
     # Test encoding / decoding
@@ -245,9 +271,10 @@ def main(use_wandb: bool = False, num_epochs: int = 1000, log_every: int = 100):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
             optimizer.step()
-        if i % log_every == 0:
+        if i % eval_every == 0:
             for j, batch in enumerate(test_dataloader):
-                model.eval_step(batch)
+                print("Running eval..")
+                model.eval_step(batch, i)
                 break
 
 
