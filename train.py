@@ -16,6 +16,7 @@ import wandb
 from pathlib import Path
 from color_bank import pico_rgb_palette
 from typing import List
+import shutil
 
 torch.manual_seed(0)
 
@@ -228,11 +229,12 @@ class GeneratorModule(nn.Module):
             )
 
 
-def main(use_wandb: bool = False, num_epochs: int = 1000, eval_every: int = 5):
+def main(use_wandb: bool = False, num_epochs: int = 1000, eval_every: int = 50):
     num_colors = 256
     if use_wandb:
         wandb.init(project="ten-dollar-model")
 
+    shutil.rmtree("debug_images", ignore_errors=True)
     Path("debug_images").mkdir(exist_ok=True)
 
     custom_palette = np.array(pico_rgb_palette).flatten().tolist()
@@ -263,7 +265,7 @@ def main(use_wandb: bool = False, num_epochs: int = 1000, eval_every: int = 5):
     model = GeneratorModule(
         device, Generator(device, num_colors=num_colors), palette_img, use_wandb
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
             loss = model.training_step(batch)
