@@ -127,7 +127,7 @@ class Generator(nn.Module):
         self,
         device: torch.device,
         noise_emb_size: int = 5,
-        num_colors: int = 16,
+        num_colors: int = 256,
         num_filters: int = 512,
         num_residual_blocks: int = 8,
         kernel_size: int = 7,
@@ -223,13 +223,10 @@ class GeneratorModule(nn.Module):
         if self.use_wandb:
             self.results_table.add_data([wandb.Image(results_grid)])
             wandb.log({"results": self.results_table})
-        else:
-            results_grid.save(
-                os.path.join("debug_images", f"results_epoch_{epoch}.png")
-            )
+        results_grid.save(os.path.join("debug_images", f"results_epoch_{epoch}.png"))
 
 
-def main(use_wandb: bool = False, num_epochs: int = 1000, eval_every: int = 50):
+def main(use_wandb: bool = False, num_epochs: int = 5000, eval_every: int = 10):
     num_colors = 256
     if use_wandb:
         wandb.init(project="ten-dollar-model")
@@ -259,19 +256,28 @@ def main(use_wandb: bool = False, num_epochs: int = 1000, eval_every: int = 50):
         dataset, [train_size, test_size]
     )
     # test encoding / decoding
-    train_dataloader = DataLoader(train_dataset, batch_size=8, num_workers=1)
-    test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=1)
+    train_dataloader = DataLoader(train_dataset, batch_size=8, num_workers=4)
+    test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=4)
     device = torch.device("cuda")
     model = GeneratorModule(
         device, Generator(device, num_colors=num_colors), palette_img, use_wandb
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
             loss = model.training_step(batch)
-            print(i, j, loss.item())
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            grads = [
+                param.grad.detach().flatten()
+                for param in model.parameters()
+                if param.grad is not None
+            ]
+            total_norm = torch.cat(grads).norm()
+
+            print("Total norm: ", total_norm)
+            print(f"Epoch {i}, batch {j}, loss {loss.item()}, total norm: {total_norm}")
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 100)
             optimizer.step()
         if i % eval_every == 0:
             for j, batch in enumerate(test_dataloader):
