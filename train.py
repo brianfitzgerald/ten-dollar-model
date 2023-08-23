@@ -22,7 +22,8 @@ import imageio
 torch.manual_seed(0)
 
 
-def encode_image(image: Image.Image, palette: np.ndarray) -> torch.Tensor:
+def encode_image(image_path: str, palette: np.ndarray) -> torch.Tensor:
+    image = imageio.imread(image_path, pilmode="RGB").astype(float) / 255.0
     def find_closest_color(pixel):
         distances = np.sum((palette - pixel) ** 2, axis=1)
         return np.argmin(distances)
@@ -68,7 +69,7 @@ class PixelDataset(Dataset):
         self.image_list = [
             filename for filename in os.listdir(data_root) if filename.endswith(".png")
         ]
-        self.palette_img = palette
+        self.palette = palette
         self.transforms = transforms.Compose(
             [
                 transforms.RandomHorizontalFlip(),
@@ -84,9 +85,7 @@ class PixelDataset(Dataset):
         image_filename = self.image_list[idx]
         image_path = os.path.join(self.data_root, image_filename)
 
-        image = Image.open(image_path).convert("RGB")
-        image = self.transforms(image)
-        image_tensor = encode_image(image, self.palette_img)
+        image_tensor = encode_image(image_path, self.palette)
 
         image_name = os.path.splitext(image_filename)[0]
 
@@ -232,8 +231,7 @@ def main(use_wandb: bool = False, num_epochs: int = 5000, eval_every: int = 10):
     num_colors = len(color_palette)
 
     # Test encoding / decoding
-    enc_test_image = imageio.imread('./spritesheets/food/Wine.png', pilmode="RGB").astype(float) / 255.0
-    encoded = encode_image(enc_test_image, color_palette)
+    encoded = encode_image('./spritesheets/food/Apple Pie.png', color_palette)
     decoded = decode_image_batch(encoded.unsqueeze(0), color_palette)
     decoded[0].save(os.path.join("debug_images", "decoded.png"))
 
