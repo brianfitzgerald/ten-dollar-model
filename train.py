@@ -15,32 +15,33 @@ import numpy as np
 import wandb
 from pathlib import Path
 from color_bank import pico_rgb_palette
-from typing import List
+from typing import List, Tuple
 import shutil
+import imageio
 
 torch.manual_seed(0)
 
 
-def encode_image(
-    image: Image.Image, palette_img: ImagePalette.ImagePalette
-) -> torch.Tensor:
-    image = image.quantize(palette=palette_img, dither=0)
-    quantized_tensor = torch.from_numpy(np.array(image)).long()
-    one_hot_encoded = F.one_hot(quantized_tensor, 256)
+def encode_image(image: Image.Image, palette: np.ndarray) -> torch.Tensor:
+    def find_closest_color(pixel):
+        distances = np.sum((palette - pixel) ** 2, axis=1)
+        return np.argmin(distances)
+
+    quantized_image = np.apply_along_axis(find_closest_color, 2, image)
+    one_hot_encoded = F.one_hot(torch.tensor(quantized_image), len(palette))
     return one_hot_encoded
 
 
 def decode_image_batch(
-    image_tensor_batch: torch.Tensor, palette_img: Image.Image
+    image_tensor_batch: torch.Tensor, palette: np.ndarray
 ) -> List[Image.Image]:
     out_imgs = []
     for batch_idx in range(image_tensor_batch.shape[0]):
-        img_tensor = image_tensor_batch[batch_idx].cpu()
-        img_tensor = img_tensor.argmax(-1)
-        img_np = img_tensor.numpy().astype(np.uint8)
-        img = Image.fromarray(img_np, mode="P")
-        img.putpalette(palette_img.getpalette())
-        out_imgs.append(img)
+        img_tensor = image_tensor_batch[batch_idx].argmax(dim=-1).cpu()
+        rgb_image = palette[img_tensor]
+        pil_image = Image.fromarray((rgb_image * 255).astype(np.uint8))
+        out_imgs.append(pil_image)
+
     return out_imgs
 
 
@@ -62,18 +63,12 @@ def image_grid(image_list: List[List[Image.Image]]) -> Image.Image:
 
 
 class PixelDataset(Dataset):
-    def __init__(
-        self,
-        data_root,
-        palette_img: Image.Image,
-        num_colors: int = 16,
-    ):
+    def __init__(self, data_root, palette):
         self.data_root = data_root
         self.image_list = [
             filename for filename in os.listdir(data_root) if filename.endswith(".png")
         ]
-        self.num_colors: int = num_colors
-        self.palette_img = palette_img
+        self.palette_img = palette
         self.transforms = transforms.Compose(
             [
                 transforms.RandomHorizontalFlip(),
@@ -127,7 +122,7 @@ class Generator(nn.Module):
         self,
         device: torch.device,
         noise_emb_size: int = 5,
-        num_colors: int = 256,
+        num_colors: int = 16,
         num_filters: int = 512,
         num_residual_blocks: int = 8,
         kernel_size: int = 7,
@@ -227,29 +222,22 @@ class GeneratorModule(nn.Module):
 
 
 def main(use_wandb: bool = False, num_epochs: int = 5000, eval_every: int = 10):
-    num_colors = 256
     if use_wandb:
         wandb.init(project="ten-dollar-model")
 
     shutil.rmtree("debug_images", ignore_errors=True)
     Path("debug_images").mkdir(exist_ok=True)
 
-    custom_palette = np.array(pico_rgb_palette).flatten().tolist()
-
-    # while len(custom_palette) < 768:
-    #     custom_palette.extend([0, 0, 0])
-
-    # Create a 'P' mode image using the custom palette
-    palette_img = Image.new("P", (1, 1))
-    palette_img.putpalette(custom_palette)
+    color_palette = np.array(pico_rgb_palette) / 255.0
+    num_colors = len(color_palette)
 
     # Test encoding / decoding
-    enc_test_image = Image.open("./spritesheets/food/Wine.png").convert("RGB")
-    encoded = encode_image(enc_test_image, palette_img)
-    decoded = decode_image_batch(encoded.unsqueeze(0), palette_img)
+    enc_test_image = imageio.imread('./spritesheets/food/Wine.png', pilmode="RGB").astype(float) / 255.0
+    encoded = encode_image(enc_test_image, color_palette)
+    decoded = decode_image_batch(encoded.unsqueeze(0), color_palette)
     decoded[0].save(os.path.join("debug_images", "decoded.png"))
 
-    dataset = PixelDataset("./spritesheets/food", palette_img, num_colors)
+    dataset = PixelDataset("./spritesheets/food", color_palette)
     train_size = int(0.9 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
@@ -260,9 +248,9 @@ def main(use_wandb: bool = False, num_epochs: int = 5000, eval_every: int = 10):
     test_dataloader = DataLoader(test_dataset, batch_size=8, num_workers=4)
     device = torch.device("cuda")
     model = GeneratorModule(
-        device, Generator(device, num_colors=num_colors), palette_img, use_wandb
+        device, Generator(device, num_colors=num_colors), color_palette, use_wandb
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-6)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
             loss = model.training_step(batch)

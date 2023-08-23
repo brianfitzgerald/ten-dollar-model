@@ -6,3 +6,4 @@ wandb
 fire
 sentence-transformers
 numpy
+imageio
