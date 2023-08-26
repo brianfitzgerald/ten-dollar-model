@@ -188,6 +188,7 @@ class Generator(nn.Module):
         self.out_conv = nn.Conv2d(
             in_channels=self.num_filters, out_channels=16, kernel_size=9
         )
+        self.group_norm = nn.GroupNorm(num_groups=4, num_channels=num_colors)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, image, caption_enc):
@@ -199,6 +200,7 @@ class Generator(nn.Module):
         x = self.residual_blocks(x)
         # x = self.pad(x)
         x = self.out_conv(x)
+        x = self.group_norm(x)
         return self.softmax(x)
 
 
@@ -256,7 +258,7 @@ class GeneratorModule(nn.Module):
         results_grid.save(os.path.join("debug_images", f"results_epoch_{epoch}.png"))
 
 
-def main(use_wandb: bool = False, num_epochs: int = 10000, eval_every: int = 100):
+def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 100):
     if use_wandb:
         wandb.init(project="ten-dollar-model")
 
@@ -282,8 +284,8 @@ def main(use_wandb: bool = False, num_epochs: int = 10000, eval_every: int = 100
         dataset, [train_size, test_size]
     )
     # test encoding / decoding
-    train_dataloader = DataLoader(train_dataset, batch_size=16, num_workers=4)
-    test_dataloader = DataLoader(test_dataset, batch_size=16, num_workers=4)
+    train_dataloader = DataLoader(train_dataset, batch_size=64, num_workers=4)
+    test_dataloader = DataLoader(test_dataset, batch_size=64, num_workers=4)
     device = torch.device("cuda")
     model = GeneratorModule(
         device, Generator(device, num_colors=num_colors), color_palette, use_wandb
