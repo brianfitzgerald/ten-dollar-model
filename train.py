@@ -20,7 +20,7 @@ import shutil
 import imageio
 
 torch.manual_seed(0)
-torch.autograd.detect_anomaly(True)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def encode_image(image: Image.Image, palette: np.ndarray) -> torch.Tensor:
@@ -97,9 +97,8 @@ class PixelDataset(Dataset):
         image_tensor = encode_image(image, self.palette)
 
         image_name = os.path.splitext(image_filename)[0]
-        embedding = torch.from_numpy(self.sentence_encoder.encode(image_name))
 
-        return image_tensor, image_name, embedding
+        return image_tensor, image_name
 
 
 class NumpyDataset(Dataset):
@@ -186,7 +185,7 @@ class Generator(nn.Module):
         )
         self.pad = nn.ZeroPad2d(1)
         self.out_conv = nn.Conv2d(
-            in_channels=self.num_filters, out_channels=16, kernel_size=9
+            in_channels=self.num_filters, out_channels=16, kernel_size=3, padding=1
         )
         self.group_norm = nn.GroupNorm(num_groups=4, num_channels=num_colors)
         self.softmax = nn.Softmax(dim=-1)
@@ -200,7 +199,7 @@ class Generator(nn.Module):
         x = self.residual_blocks(x)
         # x = self.pad(x)
         x = self.out_conv(x)
-        x = self.group_norm(x)
+        # x = self.group_norm(x)
         return self.softmax(x)
 
 
@@ -231,26 +230,26 @@ class GeneratorModule(nn.Module):
             param.requires_grad = False
 
     def training_step(self, batch):
-        image, caption, embeddings = batch
+        image, caption = batch
+        embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(self.device)
         image = image.to(self.device)
-        embeddings = embeddings.to(self.device)
         preds = self.generator(image, embeddings)
-        image_classes = image.argmax(dim=-1)
+        image_classes = image.argmax(dim=1)
         loss = self.loss_fn(torch.log(preds), image_classes)
         if self.use_wandb:
             wandb.log({"loss": loss.item()})
         return loss
 
     def eval_step(self, batch, epoch: int):
-        image, caption, embeddings = batch
+        image, caption = batch
         image = image.to(self.device)
-        embeddings = embeddings.to(self.device)
+        embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(self.device)
         preds = self.generator(image, embeddings)
         input_images = decode_image_batch(image, self.palette)
         preds_for_decode = preds.permute(0, 2, 3, 1)
         pred_images = decode_image_batch(preds_for_decode, self.palette)
         results_grid = image_grid([input_images, pred_images])
-        image_classes = image.argmax(dim=-1)
+        image_classes = image.argmax(dim=1)
         loss = self.loss_fn(torch.log(preds), image_classes)
         if self.use_wandb:
             self.results_table.add_data([wandb.Image(results_grid)])
@@ -265,9 +264,9 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
     shutil.rmtree("debug_images", ignore_errors=True)
     Path("debug_images").mkdir(exist_ok=True)
 
-    dataset = NumpyDataset(f"./sprite_gpt4aug.npy")
-    # color_palette = np.array(pico_rgb_palette) / 255.0
-    color_palette = np.array(dataset.color_palette_rgb) / 255.0
+    # dataset = NumpyDataset(f"./sprite_gpt4aug.npy")
+    color_palette = np.array(pico_rgb_palette) / 255.0
+    # color_palette = np.array(dataset.color_palette_rgb) / 255.0
 
     num_colors = len(color_palette)
     dataset_name = "futuristic"
@@ -277,7 +276,7 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
     decoded = decode_image_batch(encoded.unsqueeze(0), color_palette)
     decoded[0].save(os.path.join("debug_images", "decoded.png"))
 
-    # dataset = PixelDataset(f"./spritesheets/{dataset_name}", color_palette)
+    dataset = PixelDataset(f"./spritesheets/{dataset_name}", color_palette)
     train_size = int(0.9 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
@@ -290,7 +289,7 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
     model = GeneratorModule(
         device, Generator(device, num_colors=num_colors), color_palette, use_wandb
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
             loss = model.training_step(batch)
@@ -306,7 +305,7 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
             if use_wandb:
                 wandb.log({"total_norm": total_norm})
 
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), 5000)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 100)
             optimizer.step()
         if i % eval_every == 0:
             for j, batch in enumerate(test_dataloader):
