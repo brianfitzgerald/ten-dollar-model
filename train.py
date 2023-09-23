@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from datasets import load_dataset
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 import fire
@@ -18,6 +19,7 @@ from color_bank import pico_rgb_palette, bw_palette
 from typing import List, Tuple
 import shutil
 import imageio
+from enum import IntEnum
 
 torch.manual_seed(0)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -131,7 +133,7 @@ class NumpyDataset(Dataset):
 
 class ResidualBlock(nn.Module):
     def __init__(
-        self, num_filters: int = 128, kernel_size: int = 7, upsampling=False
+        self, kernel_size: int = 7, num_filters: int = 128, upsampling=False
     ) -> None:
         super(ResidualBlock, self).__init__()
         self.upsampling = upsampling
@@ -157,7 +159,7 @@ class Generator(nn.Module):
     def __init__(
         self,
         device: torch.device,
-        noise_emb_size: int = 3,
+        noise_emb_size: int = 5,
         num_colors: int = 16,
         num_filters: int = 128,
         num_residual_blocks: int = 5,
@@ -179,16 +181,15 @@ class Generator(nn.Module):
         )
         self.residual_blocks = nn.Sequential(
             *[
-                ResidualBlock(self.num_filters, kernel_size, i < 2)
+                ResidualBlock(kernel_size, self.num_filters, i < 2)
                 for i in range(num_residual_blocks)
             ]
         )
         self.pad = nn.ZeroPad2d(1)
         self.out_conv = nn.Conv2d(
-            in_channels=self.num_filters, out_channels=16, kernel_size=3, padding=1
+            in_channels=self.num_filters, out_channels=16, kernel_size=3
         )
-        self.group_norm = nn.GroupNorm(num_groups=4, num_channels=num_colors)
-        self.softmax = nn.Softmax(dim=-1)
+        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, image, caption_enc):
         batch_size = image.shape[0]
@@ -197,10 +198,21 @@ class Generator(nn.Module):
         x = self.reshape_layer(input_emb)
         x = x.view(-1, self.num_filters, self.conv_size, self.conv_size)
         x = self.residual_blocks(x)
-        # x = self.pad(x)
         x = self.out_conv(x)
-        # x = self.group_norm(x)
+        x = self.pad(x)
         return self.softmax(x)
+
+
+class DatasetSource(IntEnum):
+    MAP = 1
+    SPRITE = 2
+
+
+class Params:
+    dataset_source: DatasetSource = DatasetSource.SPRITE
+    batch_size: int = 64
+    learning_rate: float = 5e-5
+    max_grad_norm: float = 1000
 
 
 class GeneratorModule(nn.Module):
@@ -230,8 +242,16 @@ class GeneratorModule(nn.Module):
             param.requires_grad = False
 
     def training_step(self, batch):
-        image, caption = batch
-        embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(self.device)
+        if Params.dataset_source == DatasetSource.SPRITE:
+            image, caption = batch
+            embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
+                self.device
+            )
+        elif Params.dataset_source == DatasetSource.MAP:
+            image, caption, embeddings = batch
+            image = image.to(self.device)
+            embeddings = embeddings.to(self.device)
+
         image = image.to(self.device)
         preds = self.generator(image, embeddings)
         image_classes = image.argmax(dim=1)
@@ -243,7 +263,9 @@ class GeneratorModule(nn.Module):
     def eval_step(self, batch, epoch: int):
         image, caption = batch
         image = image.to(self.device)
-        embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(self.device)
+        embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
+            self.device
+        )
         preds = self.generator(image, embeddings)
         input_images = decode_image_batch(image, self.palette)
         preds_for_decode = preds.permute(0, 2, 3, 1)
@@ -264,34 +286,42 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
     shutil.rmtree("debug_images", ignore_errors=True)
     Path("debug_images").mkdir(exist_ok=True)
 
-    # dataset = NumpyDataset(f"./sprite_gpt4aug.npy")
-    color_palette = np.array(pico_rgb_palette) / 255.0
-    # color_palette = np.array(dataset.color_palette_rgb) / 255.0
+    if Params.dataset_source == DatasetSource.MAP:
+        dataset = NumpyDataset(f"./sprite_gpt4aug.npy")
+        color_palette = np.array(dataset.color_palette_rgb) / 255.0
+    elif Params.dataset_source == DatasetSource.SPRITE:
+        dataset_name = "futuristic"
+        dataset = PixelDataset(f"./spritesheets/{dataset_name}", pico_rgb_palette)
+        color_palette = np.array(pico_rgb_palette) / 255.0
+        image = Image.open(f"./spritesheets/{dataset_name}/Crystal.png")
+        # Test encoding / decoding
+        encoded = encode_image(image, color_palette)
+        decoded = decode_image_batch(encoded.unsqueeze(0), color_palette)
+        decoded[0].save(os.path.join("debug_images", "decoded.png"))
 
     num_colors = len(color_palette)
-    dataset_name = "futuristic"
-    # Test encoding / decoding
-    image = Image.open(f"./spritesheets/{dataset_name}/Crystal.png")
-    encoded = encode_image(image, color_palette)
-    decoded = decode_image_batch(encoded.unsqueeze(0), color_palette)
-    decoded[0].save(os.path.join("debug_images", "decoded.png"))
-
-    dataset = PixelDataset(f"./spritesheets/{dataset_name}", color_palette)
     train_size = int(0.9 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(
         dataset, [train_size, test_size]
     )
     # test encoding / decoding
-    train_dataloader = DataLoader(train_dataset, batch_size=64, num_workers=4)
-    test_dataloader = DataLoader(test_dataset, batch_size=64, num_workers=4)
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=Params.batch_size, num_workers=4, pin_memory=True
+    )
+    test_dataloader = DataLoader(
+        test_dataset, batch_size=Params.batch_size, num_workers=4, pin_memory=True
+    )
     device = torch.device("cuda")
     model = GeneratorModule(
         device, Generator(device, num_colors=num_colors), color_palette, use_wandb
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=Params.learning_rate)
+    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0)
     for i in range(num_epochs):
         for j, batch in enumerate(train_dataloader):
+            optimizer.zero_grad()
             loss = model.training_step(batch)
             loss.backward()
             grads = [
@@ -300,13 +330,19 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
                 if param.grad is not None
             ]
             total_norm = torch.cat(grads).norm().item()
+            learning_rate: float = scheduler.get_last_lr()[0]
 
-            print("Epoch {:03.0f}, batch {:02.0f}, loss {:.2f}, total norm: {:.2f}".format(i, j, loss.item(), total_norm))
+            print(
+                "Epoch {:03.0f}, batch {:02.0f}, loss {:.2f}, total norm: {:.2f}, learning rate: {:.5f}".format(
+                    i, j, loss.item(), total_norm, learning_rate
+                )
+            )
             if use_wandb:
                 wandb.log({"total_norm": total_norm})
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 100)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), Params.max_grad_norm)
             optimizer.step()
+            scheduler.step()
         if i % eval_every == 0:
             for j, batch in enumerate(test_dataloader):
                 print("Running eval..")
