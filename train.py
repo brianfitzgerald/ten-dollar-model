@@ -25,6 +25,23 @@ torch.manual_seed(0)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
+class DatasetSource(IntEnum):
+    MAP = 1
+    SPRITE_NP = 2
+    SPRITESHEET = 3
+
+    @property
+    def is_numpy(self):
+        return self in (DatasetSource.MAP, DatasetSource.SPRITE_NP)
+
+
+class Params:
+    dataset_source: DatasetSource = DatasetSource.SPRITE_NP
+    batch_size: int = 256
+    learning_rate: float = 5e-4
+    max_grad_norm: float = 1
+
+
 def encode_image(image: Image.Image, palette: np.ndarray) -> torch.Tensor:
     image = image.convert("RGB")
     image = np.array(image) / 255.0
@@ -173,11 +190,11 @@ class Generator(nn.Module):
         self.num_filters = num_filters
         self.device = device
         self.num_colors = num_colors
-        self.conv_size = conv_size
+        self.conv_kernel_size = conv_size
 
         self.reshape_layer = nn.Linear(
             noise_emb_size + self.text_emb_size,
-            self.conv_size * self.conv_size * num_filters,
+            self.conv_kernel_size * self.conv_kernel_size * num_filters,
         )
         self.residual_blocks = nn.Sequential(
             *[
@@ -186,8 +203,9 @@ class Generator(nn.Module):
             ]
         )
         self.pad = nn.ZeroPad2d(1)
+        out_conv_kernel = 3 if Params.dataset_source == DatasetSource.SPRITESHEET else 9
         self.out_conv = nn.Conv2d(
-            in_channels=self.num_filters, out_channels=16, kernel_size=3
+            in_channels=self.num_filters, out_channels=16, kernel_size=out_conv_kernel
         )
         self.softmax = nn.Softmax(dim=1)
 
@@ -196,23 +214,12 @@ class Generator(nn.Module):
         noise = torch.randn((batch_size, self.noise_emb_size)).to(self.device)
         input_emb = torch.cat([noise, caption_enc], 1).to(self.device)
         x = self.reshape_layer(input_emb)
-        x = x.view(-1, self.num_filters, self.conv_size, self.conv_size)
+        x = x.view(-1, self.num_filters, self.conv_kernel_size, self.conv_kernel_size)
         x = self.residual_blocks(x)
         x = self.out_conv(x)
-        x = self.pad(x)
+        if Params.dataset_source == DatasetSource.SPRITESHEET:
+            x = self.pad(x)
         return self.softmax(x)
-
-
-class DatasetSource(IntEnum):
-    MAP = 1
-    SPRITE = 2
-
-
-class Params:
-    dataset_source: DatasetSource = DatasetSource.SPRITE
-    batch_size: int = 64
-    learning_rate: float = 5e-5
-    max_grad_norm: float = 1000
 
 
 class GeneratorModule(nn.Module):
@@ -241,38 +248,40 @@ class GeneratorModule(nn.Module):
         for param in self.sentence_encoder.parameters():
             param.requires_grad = False
 
-    def training_step(self, batch):
-        if Params.dataset_source == DatasetSource.SPRITE:
-            image, caption = batch
-            embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
+    # have to generate embeddings here as otherwise we cannot run the sentence transformer
+    # on the GPU
+    def process_batch(self, batch):
+        if Params.dataset_source == DatasetSource.SPRITESHEET:
+            images, captions = batch
+            embeddings = torch.from_numpy(self.sentence_encoder.encode(captions)).to(
                 self.device
             )
-        elif Params.dataset_source == DatasetSource.MAP:
-            image, caption, embeddings = batch
-            image = image.to(self.device)
+        elif Params.dataset_source.is_numpy:
+            images, captions, embeddings = batch
             embeddings = embeddings.to(self.device)
+        images = images.to(self.device)
+        return images, embeddings
 
-        image = image.to(self.device)
-        preds = self.generator(image, embeddings)
-        image_classes = image.argmax(dim=1)
-        loss = self.loss_fn(torch.log(preds), image_classes)
+    def training_step(self, batch):
+        images, embeddings = self.process_batch(batch)
+        pred_out = self.generator(images, embeddings)
+        true_classes = images.argmax(dim=-1)
+        loss = self.loss_fn(torch.log(pred_out), true_classes)
         if self.use_wandb:
             wandb.log({"loss": loss.item()})
         return loss
 
     def eval_step(self, batch, epoch: int):
-        image, caption = batch
-        image = image.to(self.device)
-        embeddings = torch.from_numpy(self.sentence_encoder.encode(caption)).to(
-            self.device
-        )
-        preds = self.generator(image, embeddings)
-        input_images = decode_image_batch(image, self.palette)
-        preds_for_decode = preds.permute(0, 2, 3, 1)
+        images, embeddings = self.process_batch(batch)
+        input_images = decode_image_batch(images, self.palette)
+
+        pred_out = self.generator(images, embeddings)
+        preds_for_decode = pred_out.permute(0, 2, 3, 1)
         pred_images = decode_image_batch(preds_for_decode, self.palette)
+
         results_grid = image_grid([input_images, pred_images])
-        image_classes = image.argmax(dim=1)
-        loss = self.loss_fn(torch.log(preds), image_classes)
+        image_classes = images.argmax(dim=-1)
+        loss = self.loss_fn(torch.log(pred_out), image_classes)
         if self.use_wandb:
             self.results_table.add_data([wandb.Image(results_grid)])
             wandb.log({"results": self.results_table, "eval_loss": loss.item()})
@@ -286,18 +295,21 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
     shutil.rmtree("debug_images", ignore_errors=True)
     Path("debug_images").mkdir(exist_ok=True)
 
-    if Params.dataset_source == DatasetSource.MAP:
-        dataset = NumpyDataset(f"./sprite_gpt4aug.npy")
+    if Params.dataset_source.is_numpy:
+        if Params.dataset_source == DatasetSource.MAP:
+            dataset = NumpyDataset(f"./maps_gpt4_aug.npy")
+        elif Params.dataset_source == DatasetSource.SPRITE_NP:
+            dataset = NumpyDataset(f"./sprite_gpt4aug.npy")
         color_palette = np.array(dataset.color_palette_rgb) / 255.0
-    elif Params.dataset_source == DatasetSource.SPRITE:
+    elif Params.dataset_source == DatasetSource.SPRITESHEET:
         dataset_name = "futuristic"
-        dataset = PixelDataset(f"./spritesheets/{dataset_name}", pico_rgb_palette)
         color_palette = np.array(pico_rgb_palette) / 255.0
+        dataset = PixelDataset(f"./spritesheets/{dataset_name}", color_palette)
         image = Image.open(f"./spritesheets/{dataset_name}/Crystal.png")
         # Test encoding / decoding
         encoded = encode_image(image, color_palette)
         decoded = decode_image_batch(encoded.unsqueeze(0), color_palette)
-        decoded[0].save(os.path.join("debug_images", "decoded.png"))
+        decoded[0].save(os.path.join("debug_images", "decoded_test.png"))
 
     num_colors = len(color_palette)
     train_size = int(0.9 * len(dataset))
@@ -307,10 +319,10 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
     )
     # test encoding / decoding
     train_dataloader = DataLoader(
-        train_dataset, batch_size=Params.batch_size, num_workers=4, pin_memory=True
+        train_dataset, batch_size=Params.batch_size, num_workers=8, pin_memory=True
     )
     test_dataloader = DataLoader(
-        test_dataset, batch_size=Params.batch_size, num_workers=4, pin_memory=True
+        test_dataset, batch_size=Params.batch_size, num_workers=8, pin_memory=True
     )
     device = torch.device("cuda")
     model = GeneratorModule(
