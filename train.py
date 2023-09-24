@@ -29,19 +29,23 @@ class DatasetSource(IntEnum):
     MAP = 1
     SPRITE_NP = 2
     SPRITESHEET = 3
+    SPRITESHEET_8X8 = 4
 
     @property
-    def is_numpy(self):
+    def is_numpy(self) -> bool:
         return self in (DatasetSource.MAP, DatasetSource.SPRITE_NP)
 
+    @property
+    def is_spritesheet(self) -> bool:
+        return self in (DatasetSource.SPRITESHEET, DatasetSource.SPRITESHEET_8X8)
 
 class Params:
-    dataset_source: DatasetSource = DatasetSource.SPRITE_NP
-    batch_size: int = 32
-    learning_rate: float = 1e-5
+    dataset_source: DatasetSource = DatasetSource.SPRITESHEET_8X8
+    batch_size: int = 128
+    learning_rate: float = 5e-6
     max_grad_norm: float = 1
-    eval_every: int = 10
-    num_epochs: int = 100
+    eval_every: int = 50
+    num_epochs: int = 1000
 
 
 def encode_image(image: Image.Image, palette: np.ndarray) -> torch.Tensor:
@@ -94,13 +98,15 @@ class PixelDataset(Dataset):
             filename for filename in os.listdir(data_root) if filename.endswith(".png")
         ]
         self.palette = palette
+        target_size = 8 if Params.dataset_source == DatasetSource.SPRITESHEET_8X8 else 16
         self.transforms = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Normalize(mean=0.5, std=0.5, inplace=True),
+                transforms.Resize((target_size, target_size), antialias=True),
+                # transforms.Normalize(mean=0.5, std=0.5, inplace=True),
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomVerticalFlip(),
-                transforms.ColorJitter(),
+                # transforms.ColorJitter(),
                 transforms.RandomRotation(180),
                 transforms.ToPILImage(),
             ]
@@ -253,7 +259,7 @@ class GeneratorModule(nn.Module):
     # have to generate embeddings here as otherwise we cannot run the sentence transformer
     # on the GPU
     def process_batch(self, batch):
-        if Params.dataset_source == DatasetSource.SPRITESHEET:
+        if Params.dataset_source.is_spritesheet:
             images, captions = batch
             embeddings = torch.from_numpy(self.sentence_encoder.encode(captions)).to(
                 self.device
@@ -303,11 +309,11 @@ def main(use_wandb: bool = False):
         elif Params.dataset_source == DatasetSource.SPRITE_NP:
             dataset = NumpyDataset(f"./sprite_gpt4aug.npy")
         color_palette = np.array(dataset.color_palette_rgb) / 255.0
-    elif Params.dataset_source == DatasetSource.SPRITESHEET:
-        dataset_name = "futuristic"
+    elif Params.dataset_source.is_spritesheet:
+        dataset_name = "food"
         color_palette = np.array(pico_rgb_palette) / 255.0
-        dataset = PixelDataset(f"./spritesheets/{dataset_name}", color_palette)
-        image = Image.open(f"./spritesheets/{dataset_name}/Crystal.png")
+        dataset = PixelDataset(f"./datasets/spritesheets/{dataset_name}", color_palette)
+        image = Image.open(f"./datasets/spritesheets/futuristic/Crystal.png")
         # Test encoding / decoding
         encoded = encode_image(image, color_palette)
         decoded = decode_image_batch(encoded.unsqueeze(0), color_palette)
