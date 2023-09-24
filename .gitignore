@@ -165,3 +165,6 @@ lightning_logs/
 *.npy
 wandb
 debug_images
+datasets
+datasets/
+*.DS_Store
