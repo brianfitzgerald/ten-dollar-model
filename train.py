@@ -45,7 +45,7 @@ class Params:
     learning_rate: float = 5e-6
     max_grad_norm: float = 1
     eval_every: int = 50
-    num_epochs: int = 1000
+    num_epochs: int = 250
 
 
 def encode_image(image: Image.Image, palette: np.ndarray) -> torch.Tensor:
@@ -368,6 +368,7 @@ def main(use_wandb: bool = False):
                 print("Running eval..")
                 model.eval_step(batch, i)
                 break
+    wandb.finish()
 
 
 if __name__ == "__main__":
