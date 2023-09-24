@@ -41,7 +41,7 @@ class DatasetSource(IntEnum):
 
 class Params:
     dataset_source: DatasetSource = DatasetSource.SPRITESHEET_8X8
-    batch_size: int = 128
+    batch_size: int = 32
     learning_rate: float = 5e-6
     max_grad_norm: float = 1
     eval_every: int = 50
@@ -353,7 +353,7 @@ def main(use_wandb: bool = False):
             learning_rate: float = scheduler.get_last_lr()[0]
 
             print(
-                "Epoch {:03.0f}, batch {:02.0f}, loss {:.2f}, total norm: {:.2f}, learning rate: {:.5f}".format(
+                "Epoch {:03.0f}, batch {:02.0f}, loss {:.2f}, total norm: {:.2f}, learning rate: {:.8f}".format(
                     i, j, loss.item(), total_norm, learning_rate
                 )
             )
