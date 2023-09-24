@@ -37,9 +37,11 @@ class DatasetSource(IntEnum):
 
 class Params:
     dataset_source: DatasetSource = DatasetSource.SPRITE_NP
-    batch_size: int = 256
-    learning_rate: float = 5e-4
+    batch_size: int = 32
+    learning_rate: float = 1e-5
     max_grad_norm: float = 1
+    eval_every: int = 10
+    num_epochs: int = 100
 
 
 def encode_image(image: Image.Image, palette: np.ndarray) -> torch.Tensor:
@@ -288,7 +290,7 @@ class GeneratorModule(nn.Module):
         results_grid.save(os.path.join("debug_images", f"results_epoch_{epoch}.png"))
 
 
-def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 100):
+def main(use_wandb: bool = False):
     if use_wandb:
         wandb.init(project="ten-dollar-model")
 
@@ -330,8 +332,8 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=Params.learning_rate)
-    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0)
-    for i in range(num_epochs):
+    scheduler = CosineAnnealingLR(optimizer, T_max=Params.num_epochs, eta_min=0)
+    for i in range(Params.num_epochs):
         for j, batch in enumerate(train_dataloader):
             optimizer.zero_grad()
             loss = model.training_step(batch)
@@ -355,7 +357,7 @@ def main(use_wandb: bool = False, num_epochs: int = 100000, eval_every: int = 10
             torch.nn.utils.clip_grad_norm_(model.parameters(), Params.max_grad_norm)
             optimizer.step()
             scheduler.step()
-        if i % eval_every == 0:
+        if i % Params.eval_every == 0:
             for j, batch in enumerate(test_dataloader):
                 print("Running eval..")
                 model.eval_step(batch, i)
